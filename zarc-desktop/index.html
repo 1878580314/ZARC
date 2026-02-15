@@ -53,7 +53,10 @@
           <label for="compressPassword">加密密码</label>
           <input id="compressPassword" type="password" placeholder="启用加密后必填" disabled />
 
-          <button id="compressSubmit" class="primary" type="button">开始压缩</button>
+          <div class="submit-row">
+            <button id="compressSubmit" class="primary" type="button">开始压缩</button>
+            <button id="compressAbort" class="danger hidden" type="button">停止</button>
+          </div>
 
           <div class="progress-panel">
             <div class="progress-meta">
@@ -86,7 +89,10 @@
           <label for="decompressPassword">解密密码 (加密包必填)</label>
           <input id="decompressPassword" type="password" placeholder="仅加密归档需要输入" />
 
-          <button id="decompressSubmit" class="primary" type="button">开始解压</button>
+          <div class="submit-row">
+            <button id="decompressSubmit" class="primary" type="button">开始解压</button>
+            <button id="decompressAbort" class="danger hidden" type="button">停止</button>
+          </div>
 
           <div class="progress-panel">
             <div class="progress-meta">
@@ -135,7 +141,10 @@
             </div>
           </div>
 
-          <button id="benchmarkSubmit" class="primary" type="button">开始快速测试</button>
+          <div class="submit-row">
+            <button id="benchmarkSubmit" class="primary" type="button">开始快速测试</button>
+            <button id="benchmarkAbort" class="danger hidden" type="button">停止</button>
+          </div>
 
           <div id="benchmarkSummary" class="summary"></div>
           <div id="benchmarkBars" class="bars"></div>

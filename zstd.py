@@ -105,18 +105,18 @@ class ChunkedAESWriter(io.BufferedIOBase):
     def write(self, b: bytes) -> int:
         if not b:
             return 0
-        
+
         # If internal buffer + new data < CHUNK_SIZE, just append
         if len(self._buffer) + len(b) < CHUNK_SIZE:
             self._buffer.extend(b)
             return len(b)
-        
+
         # Fill the buffer to CHUNK_SIZE and flush
         needed = CHUNK_SIZE - len(self._buffer)
         self._buffer.extend(b[:needed])
         self._flush_chunk(self._buffer)
         self._buffer = bytearray()
-        
+
         # Process remaining full chunks directly from b
         offset = needed
         while offset + CHUNK_SIZE <= len(b):
@@ -125,11 +125,11 @@ class ChunkedAESWriter(io.BufferedIOBase):
             chunk = b[offset : offset + CHUNK_SIZE]
             self._flush_chunk(chunk)
             offset += CHUNK_SIZE
-            
+
         # Buffer the remaining bytes
         if offset < len(b):
             self._buffer.extend(b[offset:])
-            
+
         return len(b)
 
     def _flush_chunk(self, data: bytes):
@@ -360,11 +360,13 @@ class ArchiveEngine:
 
                     # 3. Stream Setup
                     if source.is_file():
-                        context_manager = cctx.stream_writer(output_stream, size=total_size)
+                        context_manager = cctx.stream_writer(
+                            output_stream, size=total_size
+                        )
                     else:
                         # Directory (Tar stream): Size unknown, do not pass size arg
                         context_manager = cctx.stream_writer(output_stream)
-                        
+
                     with context_manager as zstd_writer:
                         if source.is_dir():
                             with tarfile.open(fileobj=zstd_writer, mode="w|") as tar:
@@ -401,8 +403,12 @@ class ArchiveEngine:
         # Name Deduction
         clean_name = source.name.replace(".enc", "").replace(".zst", "")
         dest_path = source.parent / clean_name.replace(".tar", "")
-        is_tar = ".tar" in str(source) or source.name.endswith(".tar.zst") or source.name.endswith(".tar.zst.enc")
-        
+        is_tar = (
+            ".tar" in str(source)
+            or source.name.endswith(".tar.zst")
+            or source.name.endswith(".tar.zst.enc")
+        )
+
         # Adjust dest_path for tar extraction
         if is_tar:
             dest_path = source.parent / (dest_path.name + "_extracted")
@@ -424,8 +430,8 @@ class ArchiveEngine:
                     # 1. Detect Encryption via Header
                     header = f_raw.read(len(MAGIC_HEADER))
                     f_raw.seek(0)
-                    is_encrypted = (header == MAGIC_HEADER)
-                    
+                    is_encrypted = header == MAGIC_HEADER
+
                     password = None
                     if is_encrypted:
                         # Pause progress to ask for password if needed (though CLI usually asks before progress starts)
@@ -450,7 +456,7 @@ class ArchiveEngine:
 
                         def seek(self, offset: int, whence: int = 0) -> int:
                             return self._stream.seek(offset, whence)
-                            
+
                         def tell(self) -> int:
                             return self._stream.tell()
 
@@ -463,9 +469,11 @@ class ArchiveEngine:
                     input_stream: IO[bytes] = monitored_stream
                     if is_encrypted:
                         if not password:
-                             # Should have been asked above
-                             raise ValueError("加密文件需要密码")
-                        input_stream = cast(IO[bytes], ChunkedAESReader(monitored_stream, password))
+                            # Should have been asked above
+                            raise ValueError("加密文件需要密码")
+                        input_stream = cast(
+                            IO[bytes], ChunkedAESReader(monitored_stream, password)
+                        )
 
                     # 4. Decompression & Extraction
                     dctx = zstd.ZstdDecompressor()
@@ -521,7 +529,7 @@ def cli_compress(
 def cli_extract(
     path: Path = typer.Argument(
         ..., help="Archive file (.zst, .enc)", exists=True, dir_okay=False
-    )
+    ),
 ):
     """Decompress and decrypt an archive."""
     engine.run_decompress(path)

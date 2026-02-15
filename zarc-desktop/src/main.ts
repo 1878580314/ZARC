@@ -88,11 +88,33 @@ const actionButtons = [
   byId<HTMLButtonElement>('decompressSubmit'),
   byId<HTMLButtonElement>('benchmarkSubmit')
 ];
+const abortButtons = {
+  compress: byId<HTMLButtonElement>('compressAbort'),
+  decompress: byId<HTMLButtonElement>('decompressAbort'),
+  benchmark: byId<HTMLButtonElement>('benchmarkAbort')
+};
 
 void initProgressEvents();
 wireEvents();
 
 function wireEvents() {
+  // Wire abort buttons
+  abortButtons.compress.addEventListener('click', () => {
+    void invoke('abort_task');
+    abortButtons.compress.disabled = true;
+    abortButtons.compress.textContent = '正在停止...';
+  });
+  abortButtons.decompress.addEventListener('click', () => {
+    void invoke('abort_task');
+    abortButtons.decompress.disabled = true;
+    abortButtons.decompress.textContent = '正在停止...';
+  });
+  abortButtons.benchmark.addEventListener('click', () => {
+    void invoke('abort_task');
+    abortButtons.benchmark.disabled = true;
+    abortButtons.benchmark.textContent = '正在停止...';
+  });
+
   compressLevel.addEventListener('input', () => {
     compressLevelLabel.textContent = compressLevel.value;
   });
@@ -156,7 +178,7 @@ function wireEvents() {
       });
       compressResult.textContent = formatOperation(report);
       setStatus(`压缩完成: ${report.outputPath}`, 'success');
-    });
+    }, 'compress');
   });
 
   byId<HTMLButtonElement>('pickDecompressSource').addEventListener('click', async () => {
@@ -196,7 +218,7 @@ function wireEvents() {
       });
       decompressResult.textContent = formatOperation(report);
       setStatus(`解压完成: ${report.outputPath}`, 'success');
-    });
+    }, 'decompress');
   });
 
   byId<HTMLButtonElement>('pickBenchmarkFile').addEventListener('click', async () => {
@@ -233,7 +255,7 @@ function wireEvents() {
       });
       renderBenchmark(report);
       setStatus(`测试完成，推荐压缩等级 L${report.recommendedLevel}。`, 'success');
-    });
+    }, 'benchmark');
   });
 }
 
@@ -350,15 +372,27 @@ function renderBenchmark(report: CompressionBenchmarkReport) {
   }
 }
 
-async function runTask(statusText: string, task: () => Promise<void>) {
+async function runTask(
+  statusText: string,
+  task: () => Promise<void>,
+  kind?: 'compress' | 'decompress' | 'benchmark'
+) {
   setBusy(statusText);
   setActionsDisabled(true);
+  if (kind) {
+    abortButtons[kind].classList.remove('hidden');
+    abortButtons[kind].disabled = false;
+    abortButtons[kind].textContent = '停止';
+  }
   try {
     await task();
   } catch (error) {
     setStatus(normalizeError(error), 'error');
   } finally {
     setActionsDisabled(false);
+    if (kind) {
+      abortButtons[kind].classList.add('hidden');
+    }
   }
 }
 

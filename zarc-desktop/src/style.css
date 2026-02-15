@@ -227,6 +227,13 @@ button.primary {
   box-shadow: 0 12px 22px rgba(13, 148, 136, 0.26);
 }
 
+button.danger {
+  margin-top: 12px;
+  background: linear-gradient(135deg, #ef4444, #b91c1c);
+  color: #fff;
+  box-shadow: 0 12px 22px rgba(239, 68, 68, 0.2);
+}
+
 button.ghost {
   background: var(--surface-soft);
   color: #20506e;
@@ -388,6 +395,16 @@ button.ghost {
   border-color: #f1b4b4;
   background: #fff1f1;
   color: #b42318;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.submit-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
 }
 
 .fade-up {

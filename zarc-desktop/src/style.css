@@ -592,64 +592,167 @@ button.ghost {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
-  padding: 12px;
-}
-
-.archive-browser h3 {
-  margin: 0 0 8px;
-  font-size: 1rem;
-}
-
-.browser-meta {
+  padding: 16px;
   display: flex;
+  flex-direction: column;
   gap: 12px;
-  font-size: 0.85rem;
-  color: var(--muted);
-  margin-bottom: 6px;
 }
 
-.browser-hash {
-  font-family: monospace;
-  font-size: 0.75rem;
-  color: var(--accent);
+.browser-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.browser-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   background: var(--surface-soft);
-  padding: 4px 8px;
-  border-radius: 6px;
-  margin-bottom: 10px;
-  word-break: break-all;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  overflow-x: auto;
+}
+
+.breadcrumbs span {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.breadcrumbs span:hover {
+  text-decoration: underline;
+}
+
+.breadcrumbs span::after {
+  content: "/";
+  margin-left: 4px;
+  color: var(--muted);
+  text-decoration: none;
+  display: inline-block;
+}
+
+.breadcrumbs span:last-child::after {
+  display: none;
+}
+
+.browser-table-header {
+  display: grid;
+  grid-template-columns: 1fr 100px;
+  padding: 8px 12px;
+  background: var(--surface-soft);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
 }
 
 .browser-list {
   list-style: none;
   padding: 0;
-  margin: 0 0 10px;
-  max-height: 200px;
+  margin: 0;
+  max-height: 300px;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface-soft);
 }
 
 .browser-list li {
-  padding: 6px 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--border);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
+  display: grid;
+  grid-template-columns: 1fr 100px;
+  align-items: center;
+  cursor: default;
+  transition: background 0.2s;
+}
+
+.browser-list li:hover {
+  background: var(--surface-soft);
+}
+
+.browser-list li.is-dir {
+  cursor: pointer;
+}
+
+.browser-list li .name-wrapper {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
 }
 
-.browser-list li:last-child {
-  border-bottom: none;
+.browser-list li .name-wrapper span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.browser-list .dir {
-  font-weight: 700;
-  color: var(--accent);
+.browser-list li .size {
+  text-align: right;
+  color: var(--muted);
+  font-family: monospace;
 }
 
-button.small {
-  padding: 4px 10px;
-  font-size: 0.8rem;
+/* Chart Container */
+.chart-container {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+}
+
+.chart-container header {
+  margin-bottom: 12px;
+}
+
+.chart-container h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.svg-chart {
+  width: 100%;
+  height: 240px;
+  background: var(--surface-soft);
+  border-radius: 12px;
+  position: relative;
+}
+
+.svg-chart svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.chart-point {
+  transition: r 0.2s, stroke-width 0.2s;
+  cursor: pointer;
+}
+
+.chart-point:hover {
+  r: 8;
+  stroke-width: 3;
+}
+
+.chart-point.recommended {
+  fill: var(--accent);
+  filter: drop-shadow(0 0 4px var(--accent));
+}
+
+.chart-label {
+  font-size: 10px;
+  fill: var(--muted);
+  pointer-events: none;
 }
 
 .fade-up {

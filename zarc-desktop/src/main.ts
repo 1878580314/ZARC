@@ -131,12 +131,154 @@ const browserTotalSize = byId<HTMLElement>('browserTotalSize');
 const browserHash = byId<HTMLElement>('browserHash');
 const browserList = byId<HTMLElement>('browserList');
 const closeBrowser = byId<HTMLButtonElement>('closeBrowser');
+const browserBreadcrumbs = byId<HTMLElement>('browserBreadcrumbs');
+
+const benchmarkChartContainer = byId<HTMLElement>('benchmarkChartContainer');
+const benchmarkChart = byId<HTMLElement>('benchmarkChart');
+
+let currentArchiveEntries: ArchiveEntry[] = [];
+let currentPath = '';
 
 void initProgressEvents();
 void initDragAndDrop();
 void initTheme();
 void initViewSwitcher();
 wireEvents();
+
+function renderBrowser() {
+  browserList.innerHTML = '';
+  
+  // Update Breadcrumbs
+  browserBreadcrumbs.innerHTML = '<span data-path="">root</span>';
+  if (currentPath) {
+    const parts = currentPath.split('/').filter(p => p);
+    let cumulative = '';
+    parts.forEach(p => {
+      cumulative += p + '/';
+      const span = document.createElement('span');
+      span.textContent = p;
+      span.dataset.path = cumulative;
+      browserBreadcrumbs.appendChild(span);
+    });
+  }
+
+  // Filter entries based on current path
+  // Entry path is like "dir/file.txt" or "file.txt"
+  const items = new Map<string, { size: number, isDir: boolean }>();
+  
+  currentArchiveEntries.forEach(entry => {
+    const relPath = entry.path.startsWith(currentPath) ? entry.path.slice(currentPath.length) : null;
+    if (relPath === null || relPath === '') return;
+
+    const parts = relPath.split('/');
+    const name = parts[0];
+    const isDir = parts.length > 1 || entry.isDir;
+
+    if (items.has(name)) {
+      const existing = items.get(name)!;
+      existing.size += entry.size;
+      if (isDir) existing.isDir = true;
+    } else {
+      items.set(name, { size: entry.size, isDir });
+    }
+  });
+
+  // Sort: Dirs first, then alpha
+  const sortedNames = Array.from(items.keys()).sort((a, b) => {
+    const ia = items.get(a)!;
+    const ib = items.get(b)!;
+    if (ia.isDir !== ib.isDir) return ia.isDir ? -1 : 1;
+    return a.localeCompare(b);
+  });
+
+  sortedNames.forEach(name => {
+    const item = items.get(name)!;
+    const li = document.createElement('li');
+    if (item.isDir) li.className = 'is-dir';
+    
+    const icon = item.isDir ? '📁' : getFileIcon(name);
+    
+    li.innerHTML = `
+      <div class="name-wrapper">
+        <span class="icon">${icon}</span>
+        <span>${name}</span>
+      </div>
+      <span class="size">${item.isDir ? '-' : formatBytes(item.size)}</span>
+    `;
+
+    if (item.isDir) {
+      li.addEventListener('click', () => {
+        currentPath += name + '/';
+        renderBrowser();
+      });
+    }
+    browserList.appendChild(li);
+  });
+}
+
+function getFileIcon(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase();
+  switch(ext) {
+    case 'zst': case 'enc': case 'zip': case 'rar': return '📦';
+    case 'exe': case 'sh': case 'app': return '⚙️';
+    case 'jpg': case 'png': case 'webp': case 'gif': return '🖼️';
+    case 'mp4': case 'mkv': case 'mov': return '🎬';
+    case 'mp3': case 'wav': case 'flac': return '🎵';
+    case 'pdf': return '📄';
+    case 'txt': case 'md': return '📝';
+    default: return '📄';
+  }
+}
+
+function renderBenchmarkChart(report: CompressionBenchmarkReport) {
+  benchmarkChartContainer.classList.remove('hidden');
+  const results = report.results;
+  if (results.length < 2) return;
+
+  const margin = { top: 20, right: 40, bottom: 40, left: 50 };
+  const width = benchmarkChart.clientWidth || 600;
+  const height = 240;
+
+  const maxSpeed = Math.max(...results.map(r => r.meanThroughputMiBs)) * 1.1;
+  const minRatio = Math.min(...results.map(r => r.ratioPercent)) * 0.9;
+  const maxRatio = Math.max(...results.map(r => r.ratioPercent)) * 1.1;
+
+  // X: Ratio (Inverted, smaller is better/right)
+  // Y: Speed (Larger is better/up)
+  const getX = (ratio: number) => margin.left + (width - margin.left - margin.right) * (1 - (ratio - minRatio) / (maxRatio - minRatio));
+  const getY = (speed: number) => height - margin.bottom - (height - margin.top - margin.bottom) * (speed / maxSpeed);
+
+  let svgContent = `<svg viewBox="0 0 ${width} ${height}">`;
+  
+  // Axes
+  svgContent += `<line x1="${margin.left}" y1="${height-margin.bottom}" x2="${width-margin.right}" y2="${height-margin.bottom}" stroke="var(--border)" stroke-width="1" />`;
+  svgContent += `<line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${height-margin.bottom}" stroke="var(--border)" stroke-width="1" />`;
+  
+  // Axis Labels
+  svgContent += `<text x="${width/2}" y="${height-5}" text-anchor="middle" class="chart-label">压缩率 % (向右越小)</text>`;
+  svgContent += `<text x="10" y="${height/2}" text-anchor="middle" class="chart-label" transform="rotate(-90, 10, ${height/2})">速度 MiB/s</text>`;
+
+  // Lines connecting points (optional, maybe not for scatter)
+  // Data Points
+  results.forEach(r => {
+    const x = getX(r.ratioPercent);
+    const y = getY(r.meanThroughputMiBs);
+    const isRecommended = r.level === report.recommendedLevel;
+    
+    svgContent += `
+      <circle cx="${x}" cy="${y}" r="${isRecommended ? 6 : 4}" 
+              fill="${isRecommended ? 'var(--accent)' : 'var(--muted)'}" 
+              class="chart-point ${isRecommended ? 'recommended' : ''}"
+              data-level="${r.level}">
+        <title>L${r.level}: ${r.meanThroughputMiBs.toFixed(1)} MiB/s, ${r.ratioPercent.toFixed(2)}%</title>
+      </circle>
+      <text x="${x}" y="${y-10}" text-anchor="middle" font-size="10" fill="var(--muted)">L${r.level}</text>
+    `;
+  });
+
+  svgContent += '</svg>';
+  benchmarkChart.innerHTML = svgContent;
+}
 
 function initViewSwitcher() {
   navItems.forEach(item => {
@@ -239,22 +381,26 @@ function wireEvents() {
         }
       });
 
-      browserFileCount.textContent = `文件数: ${report.totalFiles}`;
-      browserTotalSize.textContent = `解压大小: ${formatBytes(report.uncompressedSize)}`;
+      currentArchiveEntries = report.entries;
+      currentPath = '';
+      
+      browserFileCount.textContent = `文件总数: ${report.totalFiles}`;
+      browserTotalSize.textContent = `解压总计: ${formatBytes(report.uncompressedSize)}`;
       browserHash.textContent = `BLAKE3: ${report.hash}`;
       
-      browserList.innerHTML = '';
-      report.entries.forEach(entry => {
-        const li = document.createElement('li');
-        if (entry.isDir) li.className = 'dir';
-        li.innerHTML = `<span>${entry.path}</span> <small>${formatBytes(entry.size)}</small>`;
-        browserList.appendChild(li);
-      });
-
+      renderBrowser();
       archiveBrowser.classList.remove('hidden');
       setStatus('归档预览已加载。', 'success');
     } catch (error) {
       setStatus(normalizeError(error), 'error');
+    }
+  });
+
+  browserBreadcrumbs.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'SPAN' && target.dataset.path !== undefined) {
+      currentPath = target.dataset.path;
+      renderBrowser();
     }
   });
 
@@ -403,6 +549,7 @@ function wireEvents() {
         }
       });
       renderBenchmark(report);
+      renderBenchmarkChart(report);
       setStatus(`测试完成，推荐压缩等级 L${report.recommendedLevel}。`, 'success');
     }, 'benchmark');
   });

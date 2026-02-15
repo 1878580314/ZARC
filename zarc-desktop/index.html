@@ -127,14 +127,28 @@
               </div>
 
               <div id="archiveBrowser" class="archive-browser hidden">
-                <h3>归档内容预览</h3>
+                <header class="browser-header">
+                  <h3>归档内容预览</h3>
+                  <div class="browser-actions">
+                    <button id="closeBrowser" class="ghost small" type="button">关闭</button>
+                  </div>
+                </header>
+                
+                <nav id="browserBreadcrumbs" class="breadcrumbs">
+                  <span data-path="">root</span>
+                </nav>
+
                 <div class="browser-meta">
                   <span id="browserFileCount">-</span>
                   <span id="browserTotalSize">-</span>
                 </div>
                 <div id="browserHash" class="browser-hash"></div>
+                
+                <div class="browser-table-header">
+                  <span>名称</span>
+                  <span>大小</span>
+                </div>
                 <ul id="browserList" class="browser-list"></ul>
-                <button id="closeBrowser" class="ghost small" type="button">关闭预览</button>
               </div>
 
               <pre id="decompressResult" class="result"></pre>
@@ -181,6 +195,15 @@
               </div>
 
               <div id="benchmarkSummary" class="summary"></div>
+              
+              <div id="benchmarkChartContainer" class="chart-container hidden">
+                <header>
+                  <h4>性能分析图表 (率 vs 速度)</h4>
+                  <small>越靠右上方性能越优</small>
+                </header>
+                <div id="benchmarkChart" class="svg-chart"></div>
+              </div>
+
               <div id="benchmarkBars" class="bars"></div>
             </div>
           </section>

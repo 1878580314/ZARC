@@ -1,100 +1,100 @@
-# ZARC Studio
+# Z-Archive Nexus (ZARC)
 
-该仓库已重构为 `Rust + Tauri` 桌面应用，提供：
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
+[![Rust: 1.70+](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 
-- 高性能 `zstd` 压缩与解压
-- 文件与目录归档（目录打包为 `.tar.zst`）
-- 高性能加密归档（`XChaCha20-Poly1305 + Argon2id`）
-- 压缩/解压实时进度条（百分比、吞吐、ETA）
-- 快速压缩性能测试（多等级对比并推荐压缩等级）
-- 浅色系、轻量化跨平台 UI
+[English](#english) | [中文](#中文)
 
-## 开发运行
+---
 
-```bash
-cd zarc-desktop
-npm install
-npm run tauri dev
-```
+## English
 
-## 打包
+ZARC (Z-Archive Nexus) is a high-performance, security-focused archiving suite. It combines the extreme speed of **Zstandard (zstd)** with robust **AES-256-GCM/XChaCha20Poly1305** encryption to provide a modern alternative for data storage and transfer.
 
-```bash
-cd zarc-desktop
-npm install
-npm run tauri build
-```
+The project offers two interfaces:
+1.  **ZARC Studio (Desktop)**: A cross-platform GUI built with Tauri, Vite, and Rust.
+2.  **ZARC CLI/TUI (zstd.py)**: A versatile Python script for terminal power users.
 
-## Windows 打包 (优化)
+### ✨ Key Features
 
-在 Windows 10/11 环境中执行：
+-   **Extreme Compression**: Powered by Zstandard, offering 22 compression levels with multi-threaded support.
+-   **Security First**: 
+    -   **CLI**: AES-256-GCM chunked encryption.
+    -   **Desktop**: XChaCha20Poly1305 authenticated encryption with Argon2id key derivation.
+-   **Intelligent Archiving**: Support for multi-volume (splitting) archives.
+-   **Compression Benchmark**: Integrated tool to analyze compression ratio vs. speed for your specific hardware.
+-   **Workflow Automation**: 
+    -   Optional **Source Deletion** after successful compression.
+    -   Configurable **Detailed Logging** (saved to `zarc.log` in the application directory).
+-   **Data Integrity**: BLAKE3 hashing for fast and secure file verification.
 
-```powershell
-cd zarc-desktop
-npm install
-npm run tauri:build:win
-```
+### 🚀 Getting Started
 
-产物默认位于（便携版 EXE）：
+#### ZARC Studio (Desktop)
+1.  Navigate to `zarc-desktop/`.
+2.  Install dependencies: `npm install`.
+3.  Run in dev mode: `npm run tauri dev` or build: `npm run tauri build`.
 
-- `zarc-desktop/src-tauri/target/release/zarc-desktop.exe`
+#### ZARC CLI (Python)
+1.  Install dependencies: `pip install zstandard cryptography typer rich`.
+2.  Run the interactive UI: `python zstd.py`
+3.  Or use CLI commands:
+    ```bash
+    # Compress with level 12, logging enabled, and delete source after success
+    python zstd.py --log compress /path/to/source --level 12 --delete-source
+    ```
 
-如需便携分发，可将 EXE 压缩为 zip 后直接分发。
+---
 
-本项目已启用发布优化（`LTO + strip + panic=abort + codegen-units=1`），用于提升性能并减小安装包体积。
+## 中文
 
-## GitHub 自动构建与发布
+ZARC (Z-Archive Nexus) 是一款兼顾极致性能与高安全性的现代化存档工具集。它将 **Zstandard (zstd)** 的高速压缩能力与 **AES-256-GCM/XChaCha20Poly1305** 坚固加密相结合，为数据存储与传输提供可靠方案。
 
-仓库已配置跨平台自动构建工作流：
+本项目提供两种交互方式：
+1.  **ZARC Studio (桌面端)**: 基于 Tauri、Vite 和 Rust 构建的跨平台图形界面应用。
+2.  **ZARC CLI/TUI (zstd.py)**: 为终端高级用户准备的多功能 Python 脚本。
 
-- `push main`：自动构建 Linux(`.deb/.AppImage`) + Windows(`portable .zip`) + macOS(`.dmg`) 并上传为 Actions artifacts
-- `pull_request -> main`：自动执行同样的三平台构建校验
-- `push tag v*`：构建三平台产物并自动创建 GitHub Release，附带安装包
-- `workflow_dispatch`：可手动触发一次完整构建/发布流程
+### ✨ 核心特性
 
-## WSL 图形驱动告警排障
+-   **极致压缩**: 基于 Zstandard 算法，支持 22 级压缩等级及多线程并行处理。
+-   **安全至上**:
+    -   **命令行版**: AES-256-GCM 分块加密。
+    -   **桌面版**: XChaCha20Poly1305 认证加密，辅以 Argon2id 密钥派生。
+-   **智能存档**: 支持分卷压缩（自动切分大文件）。
+-   **性能基准测试**: 内置工具可针对您的硬件环境分析压缩率与吞吐量的平衡点。
+-   **自动化工作流**:
+    -   可选**压缩后自动删除源文件**。
+    -   可配置的**详细日志记录**（默认保存于程序同级目录下的 `zarc.log`）。
+-   **数据完整性**: 使用 BLAKE3 哈希算法进行极速、安全的校验。
 
-如果出现以下日志：
+### 🚀 快速入门
 
-- `libEGL warning: failed to get driver name for fd -1`
-- `MESA: error: ZINK: vkEnumeratePhysicalDevices failed`
-- `egl: failed to create dri2 screen`
+#### ZARC Studio (桌面端)
+1.  进入 `zarc-desktop/` 目录。
+2.  安装依赖: `npm install`。
+3.  启动开发模式: `npm run tauri dev` 或执行构建: `npm run tauri build`。
 
-可使用软件渲染模式启动：
+#### ZARC CLI (Python)
+1.  安装依赖: `pip install zstandard cryptography typer rich`。
+2.  启动交互式界面: `python zstd.py`。
+3.  或直接使用命令行指令:
+    ```bash
+    # 使用等级 12 压缩，开启日志，并在成功后删除源文件
+    python zstd.py --log compress /path/to/source --level 12 --delete-source
+    ```
 
-```bash
-cd zarc-desktop
-npm run tauri:dev:wsl
-```
+---
 
-如果你希望继续使用硬件加速，请先在 Windows 侧更新 WSLg 与显卡驱动，然后重启 WSL：
+## 🛠️ Project Structure / 项目结构
 
-```powershell
-wsl --update
-wsl --shutdown
-```
+-   `zstd.py`: Python CLI/TUI 核心脚本。
+-   `zarc-desktop/`: Tauri 桌面端工程目录。
+    -   `src/`: 前端 (TypeScript + Vite) 源码。
+    -   `src-tauri/`: 后端 (Rust) 逻辑与底层压缩实现。
+-   `.github/workflows/`: 自动化发布流程。
 
-## 快速压缩测试说明
+## 📄 License
 
-在 UI 的“快速压缩性能测试”中：
-
-- 选择文件或目录作为测试源
-- 设置等级区间（如 `1~12`）
-- 程序基于可配置样本大小进行快速多等级压缩对比
-- 输出每个等级的吞吐、压缩率，并自动给出推荐等级
-
-## 加密说明
-
-- 压缩时勾选“启用加密”并输入密码，归档将生成为 `.enc`
-- 解压 `.enc` 归档时需输入正确密码
-- 算法：`XChaCha20-Poly1305`（分块 AEAD）+ `Argon2id` 密钥派生
-
-## 加解密测试覆盖
-
-已在 Rust 单元测试中覆盖：
-
-- 文件类型：文本、JSON、二进制、空文件、Unicode 文件名
-- 文件大小：`0B`、小文件、`chunk-1`、`chunk`、`chunk+1`、多 chunk 大文件
-- 目录场景：`include_root_dir=true/false` 两种归档布局
-- 安全性：错误密码解密失败校验
-- 回归：未加密归档压缩/解压流程仍正常
+Distributed under the MIT License. See `LICENSE` for more information.
+本项目基于 MIT 协议分发。详情请参阅 `LICENSE`。

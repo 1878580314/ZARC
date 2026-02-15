@@ -71,6 +71,8 @@ const includeRootDir = byId<HTMLInputElement>('includeRootDir');
 const compressSplitSize = byId<HTMLInputElement>('compressSplitSize');
 const compressEncrypt = byId<HTMLInputElement>('compressEncrypt');
 const compressPassword = byId<HTMLInputElement>('compressPassword');
+const enableLogging = byId<HTMLInputElement>('enableLogging');
+const deleteSourceAfter = byId<HTMLInputElement>('deleteSourceAfter');
 const compressResult = byId<HTMLElement>('compressResult');
 
 const decompressSource = byId<HTMLInputElement>('decompressSource');
@@ -457,7 +459,9 @@ function wireEvents() {
           level: toInt(compressLevel.value, 8),
           includeRootDir: includeRootDir.checked,
           password,
-          splitSizeMib: splitSize > 0 ? splitSize : null
+          splitSizeMib: splitSize > 0 ? splitSize : null,
+          enableLogging: enableLogging.checked,
+          deleteSourceAfter: deleteSourceAfter.checked
         }
       });
       compressResult.textContent = formatOperation(report);

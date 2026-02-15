@@ -51,6 +51,8 @@ struct CompressRequest {
     include_root_dir: Option<bool>,
     password: Option<String>,
     split_size_mib: Option<u64>,
+    enable_logging: Option<bool>,
+    delete_source_after: Option<bool>,
 }
 
 struct MultiVolumeWriter {
@@ -791,6 +793,17 @@ fn abort_task(state: State<'_, AppState>) {
     state.request_abort();
 }
 
+fn log_to_file(enabled: bool, message: &str) {
+    if !enabled { return; }
+    if let Ok(mut path) = std::env::current_exe() {
+        path.pop();
+        let log_file = path.join("zarc.log");
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(log_file) {
+            let _ = writeln!(f, "{}", message);
+        }
+    }
+}
+
 fn compress_archive_sync(
     request: CompressRequest,
     app: Option<AppHandle>,
@@ -805,9 +818,14 @@ fn compress_archive_sync(
     let include_root_dir = request.include_root_dir.unwrap_or(true);
     let password = normalize_password(request.password);
     let split_size_mib = request.split_size_mib;
+    let enable_logging = request.enable_logging.unwrap_or(false);
+    let delete_source_after = request.delete_source_after.unwrap_or(false);
+
     let source_bytes = count_source_bytes(&source)?;
     let output =
         resolve_compress_output(&source, request.output_path.as_deref(), password.is_some())?;
+
+    log_to_file(enable_logging, &format!("开始压缩: {} -> {}", source.display(), output.display()));
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
@@ -844,6 +862,7 @@ fn compress_archive_sync(
     if let Err(err) = operation_result {
         let _ = fs::remove_file(&output);
         reporter.fail(err.to_string());
+        log_to_file(enable_logging, &format!("压缩失败: {}", err));
         return Err(err);
     }
 
@@ -855,6 +874,17 @@ fn compress_archive_sync(
         .len();
 
     let hash = calculate_file_hash(&output).ok();
+    
+    log_to_file(enable_logging, &format!("压缩完成. 原始大小: {}, 压缩后: {}, 耗时: {:.2}s", source_bytes, output_bytes, duration));
+
+    if delete_source_after {
+        log_to_file(enable_logging, &format!("正在删除源: {}", source.display()));
+        if source.is_dir() {
+            let _ = fs::remove_dir_all(&source);
+        } else {
+            let _ = fs::remove_file(&source);
+        }
+    }
 
     Ok(OperationReport {
         operation: "compress".to_string(),

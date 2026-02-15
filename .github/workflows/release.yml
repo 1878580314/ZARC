@@ -1,4 +1,4 @@
-name: Build And Release Desktop
+name: ZARC Release
 
 on:
   push:
@@ -15,8 +15,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.platform }}
+  build-desktop:
+    name: Build Desktop (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -77,7 +77,7 @@ jobs:
         working-directory: zarc-desktop
         run: npm ci
 
-      - name: Build Tauri Bundles
+      - name: Build Tauri App
         working-directory: zarc-desktop
         run: ${{ matrix.build_command }}
 
@@ -94,30 +94,45 @@ jobs:
           Copy-Item $exe "$outDir/ZARC Studio.exe" -Force
           Compress-Archive -Path "$outDir/ZARC Studio.exe" -DestinationPath "$outDir/zarc-windows-portable.zip" -Force
 
-      - name: Upload Platform Artifact
+      - name: Upload Desktop Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
-          compression-level: 9
+
+  build-cli:
+    name: Prepare CLI Script
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload CLI Script
+        uses: actions/upload-artifact@v4
+        with:
+          name: zarc-cli-python
+          path: zstd.py
 
   publish:
-    name: Publish GitHub Release
-    needs: build
+    name: Publish Release
+    needs: [build-desktop, build-cli]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Download Build Artifacts
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
 
-      - name: Show Artifacts
-        run: ls -R release-artifacts
+      - name: Flatten and Rename Artifacts
+        run: |
+          mkdir assets
+          find release-artifacts -type f -exec cp {} assets/ \;
+          ls -R assets
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: release-artifacts/**/*
+          files: assets/*

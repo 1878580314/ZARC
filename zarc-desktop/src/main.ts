@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import './style.css';
 
-type ProgressKind = 'compress' | 'decompress';
+type ProgressKind = 'compress' | 'decompress' | 'benchmark';
 
 interface OperationReport {
   operation: string;
@@ -109,6 +109,19 @@ const abortButtons = {
   benchmark: byId<HTMLButtonElement>('benchmarkAbort')
 };
 
+const viewTitle = byId<HTMLElement>('viewTitle');
+const globalStatus = byId<HTMLElement>('globalStatus');
+const masterDropZone = byId<HTMLElement>('masterDropZone');
+
+const taskItems = {
+  compress: byId<HTMLElement>('task-compress'),
+  decompress: byId<HTMLElement>('task-decompress'),
+  benchmark: byId<HTMLElement>('task-benchmark')
+};
+
+const navItems = document.querySelectorAll('.nav-links li');
+const viewPanels = document.querySelectorAll('.view-panel');
+
 const themeToggle = byId<HTMLButtonElement>('themeToggle');
 
 const previewArchive = byId<HTMLButtonElement>('previewArchive');
@@ -122,7 +135,34 @@ const closeBrowser = byId<HTMLButtonElement>('closeBrowser');
 void initProgressEvents();
 void initDragAndDrop();
 void initTheme();
+void initViewSwitcher();
 wireEvents();
+
+function initViewSwitcher() {
+  navItems.forEach(item => {
+    item.addEventListener('click', () => {
+      const view = (item as HTMLElement).dataset.view;
+      if (view) switchView(view);
+    });
+  });
+}
+
+function switchView(viewId: string) {
+  navItems.forEach(nav => {
+    nav.classList.toggle('active', (nav as HTMLElement).dataset.view === viewId);
+  });
+  
+  viewPanels.forEach(panel => {
+    panel.classList.toggle('active', panel.id === `view-${viewId}`);
+  });
+
+  const titles: Record<string, string> = {
+    compress: '压缩存档',
+    decompress: '解压还原',
+    benchmark: '性能测试'
+  };
+  viewTitle.textContent = titles[viewId] || 'ZARC';
+}
 
 function initTheme() {
   const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -139,33 +179,30 @@ function initTheme() {
 async function initDragAndDrop() {
   await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
     const paths = event.payload.paths;
+    masterDropZone.classList.add('hidden');
+    
     if (paths.length > 0) {
       const path = paths[0];
-      // Logic: if it's a known archive format, set to decompress. Otherwise set to compress.
       const isArchive = path.toLowerCase().endsWith('.zst') || path.toLowerCase().endsWith('.enc');
       
       if (isArchive) {
         decompressSource.value = path;
-        // Optionally switch tab/view if we had tabs
+        switchView('decompress');
       } else {
         compressSource.value = path;
         benchmarkSource.value = path;
-        // Update kind tag based on extension (simple heuristic)
-        // Since we don't know if it's a dir here easily without invoke, we can just set the path.
+        switchView('compress');
       }
-      setStatus(`已加载拖入的路径: ${path}`, 'success');
+      setStatus(`已加载: ${path}`, 'success');
     }
   });
 
-  // Visual feedback for drag over (can be added with CSS classes on body)
   await listen('tauri://drag-enter', () => {
-    document.body.style.filter = 'contrast(0.9) brightness(0.9)';
+    masterDropZone.classList.remove('hidden');
   });
+  
   await listen('tauri://drag-leave', () => {
-    document.body.style.filter = '';
-  });
-  await listen('tauri://drag-drop', () => {
-    document.body.style.filter = '';
+    masterDropZone.classList.add('hidden');
   });
 }
 
@@ -383,37 +420,39 @@ async function initProgressEvents() {
 }
 
 function updateProgress(kind: ProgressKind, payload: ProgressPayload) {
-  const refs =
-    kind === 'compress'
-      ? {
-          bar: compressProgressBar,
-          percent: compressProgressPercent,
-          text: compressProgressText,
-          stats: compressProgressStats
-        }
-      : {
-          bar: decompressProgressBar,
-          percent: decompressProgressPercent,
-          text: decompressProgressText,
-          stats: decompressProgressStats
-        };
+  const isBench = (kind as string) === 'benchmark';
+  if (isBench) return; // Benchmark uses custom rendering
 
-  refs.bar.style.width = `${Math.max(0, Math.min(payload.percent, 100)).toFixed(2)}%`;
-  refs.percent.textContent = `${payload.percent.toFixed(1)}%`;
+  const taskItem = taskItems[kind];
+  const bar = byId<HTMLElement>(`${kind}ProgressBar`);
+  const percent = byId<HTMLElement>(`${kind}ProgressPercent`);
+  const text = byId<HTMLElement>(`${kind}ProgressText`);
+  const stats = byId<HTMLElement>(`${kind}ProgressStats`);
+
+  if (!payload.done) {
+    taskItem.classList.remove('hidden');
+  }
+
+  bar.style.width = `${Math.max(0, Math.min(payload.percent, 100)).toFixed(2)}%`;
+  percent.textContent = `${payload.percent.toFixed(1)}%`;
 
   if (payload.done) {
-    refs.text.textContent = payload.error ? '任务失败' : '任务完成';
+    text.textContent = payload.error ? '❌ 任务失败' : '✅ 任务完成';
+    // Hide task from hub after a delay? Or keep it. Let's keep for now.
   } else {
-    refs.text.textContent = kind === 'compress' ? '压缩进行中' : '解压进行中';
+    text.textContent = kind === 'compress' ? '正在压缩...' : '正在解压...';
   }
 
   const etaText = payload.etaSeconds === null ? '-' : `${formatSeconds(payload.etaSeconds)}`;
-  refs.stats.textContent =
-    `已处理 ${formatBytes(payload.processedBytes)} / ${formatBytes(payload.totalBytes)} • ` +
-    `速度 ${payload.throughputMiBs.toFixed(2)} MiB/s • ETA ${etaText}`;
+  stats.textContent =
+    `${formatBytes(payload.processedBytes)} / ${formatBytes(payload.totalBytes)} • ` +
+    `${payload.throughputMiBs.toFixed(2)} MiB/s • ETA ${etaText}`;
 }
 
 function resetProgress(kind: ProgressKind, text: string) {
+  const taskItem = taskItems[kind];
+  taskItem.classList.remove('hidden');
+  
   updateProgress(kind, {
     operation: kind,
     processedBytes: 0,
@@ -424,14 +463,6 @@ function resetProgress(kind: ProgressKind, text: string) {
     done: false,
     error: null
   });
-
-  if (kind === 'compress') {
-    compressProgressText.textContent = text;
-    compressProgressStats.textContent = '-';
-  } else {
-    decompressProgressText.textContent = text;
-    decompressProgressStats.textContent = '-';
-  }
 }
 
 function renderBenchmark(report: CompressionBenchmarkReport) {
@@ -448,12 +479,9 @@ function renderBenchmark(report: CompressionBenchmarkReport) {
     <div class="summary-grid">
       <div class="metric"><small>推荐等级</small><strong>L${report.recommendedLevel}</strong></div>
       <div class="metric"><small>样本大小</small><strong>${formatBytes(report.sampleBytes)}</strong></div>
-      <div class="metric"><small>线程数</small><strong>${report.threads}</strong></div>
       <div class="metric"><small>最高吞吐</small><strong>${bestThroughput.toFixed(2)} MiB/s</strong></div>
-      <div class="metric"><small>最佳压缩率</small><strong>${bestRatio.toFixed(2)}%</strong></div>
-      <div class="metric"><small>每等级轮数</small><strong>${report.iterations}</strong></div>
     </div>
-    <p class="hint" style="margin:10px 0 0;">${report.note}</p>
+    <p class="hint" style="margin:10px 0 0; font-size: 0.8rem;">${report.note}</p>
   `;
 
   const maxScore = Math.max(...report.results.map((r) => r.score), 1e-6);
@@ -533,13 +561,13 @@ function setActionsDisabled(disabled: boolean) {
 }
 
 function setBusy(message: string) {
-  statusEl.textContent = message;
-  statusEl.className = 'status busy';
+  globalStatus.textContent = message;
+  globalStatus.className = 'global-status busy';
 }
 
 function setStatus(message: string, level: 'success' | 'error') {
-  statusEl.textContent = message;
-  statusEl.className = `status ${level}`;
+  globalStatus.textContent = message;
+  globalStatus.className = `global-status ${level}`;
 }
 
 function normalizeError(error: unknown): string {

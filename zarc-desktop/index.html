@@ -10,168 +10,218 @@
   <body>
     <div class="orb orb-a"></div>
     <div class="orb orb-b"></div>
-    <div class="app">
-      <header class="hero fade-up">
-        <div class="header-top">
-          <p class="eyebrow">Rust + Tauri • Cross Platform</p>
-          <button id="themeToggle" class="ghost small-icon" type="button" title="切换主题">🌓</button>
+    
+    <!-- Master Drop Zone Overlay -->
+    <div id="masterDropZone" class="drop-zone-overlay hidden">
+      <div class="drop-zone-content">
+        <div class="drop-icon">📥</div>
+        <h2>投放文件或目录</h2>
+        <p>ZARC 将自动识别操作类型</p>
+      </div>
+    </div>
+
+    <div class="app-container">
+      <nav class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo">Z</div>
+          <span>ZARC</span>
         </div>
-        <h1>ZARC Studio</h1>
-        <p class="subtitle">高性能压缩解压、实时进度、快速等级推荐与加密保护</p>
-      </header>
+        <ul class="nav-links">
+          <li class="active" data-view="compress">
+            <span class="icon">📦</span> 压缩
+          </li>
+          <li data-view="decompress">
+            <span class="icon">🔓</span> 解压
+          </li>
+          <li data-view="benchmark">
+            <span class="icon">⚡</span> 测试
+          </li>
+        </ul>
+        <div class="sidebar-footer">
+          <button id="themeToggle" class="ghost" type="button" title="切换主题">🌓</button>
+        </div>
+      </nav>
 
-      <main class="grid">
-        <section class="card fade-up" style="--delay: 80ms">
-          <h2>压缩</h2>
-          <p class="hint">支持文件/目录压缩，提供可选加密（XChaCha20-Poly1305）。</p>
+      <main class="content">
+        <header class="top-bar">
+          <h1 id="viewTitle">压缩存档</h1>
+          <div id="globalStatus" class="global-status">就绪</div>
+        </header>
 
-          <div class="inline-actions">
-            <button id="pickCompressFile" type="button">选择文件</button>
-            <button id="pickCompressDirectory" type="button">选择目录</button>
-            <span id="compressKindTag" class="tag">当前: 文件</span>
-          </div>
+        <!-- Views Area -->
+        <div id="viewContainer">
+          <!-- Compress View -->
+          <section id="view-compress" class="view-panel active">
+            <div class="card">
+              <div class="inline-actions">
+                <button id="pickCompressFile" type="button">选择文件</button>
+                <button id="pickCompressDirectory" type="button">选择目录</button>
+                <span id="compressKindTag" class="tag">当前: 文件</span>
+              </div>
 
-          <label for="compressSource">源路径</label>
-          <input id="compressSource" readonly placeholder="请选择待压缩源" />
+              <label for="compressSource">源路径</label>
+              <input id="compressSource" readonly placeholder="请选择或拖入待压缩源" />
 
-          <label for="compressOutput">输出路径 (可选)</label>
-          <div class="row">
-            <input id="compressOutput" placeholder="留空自动生成" />
-            <button id="pickCompressOutput" class="ghost" type="button">保存到...</button>
-          </div>
+              <label for="compressOutput">输出路径 (可选)</label>
+              <div class="row">
+                <input id="compressOutput" placeholder="留空自动生成" />
+                <button id="pickCompressOutput" class="ghost" type="button">保存到...</button>
+              </div>
 
-          <label for="compressLevel">压缩等级: <span id="compressLevelLabel">8</span></label>
-          <input id="compressLevel" type="range" min="1" max="22" value="8" />
+              <div class="settings-grid">
+                <div>
+                  <label for="compressLevel">压缩等级: <span id="compressLevelLabel">8</span></label>
+                  <input id="compressLevel" type="range" min="1" max="22" value="8" />
+                </div>
+                <div>
+                  <label for="compressSplitSize">分卷大小 (MiB)</label>
+                  <input id="compressSplitSize" type="number" min="0" value="0" />
+                </div>
+              </div>
 
-          <label class="checkbox">
-            <input id="includeRootDir" type="checkbox" checked />
-            <span>目录压缩时包含根目录</span>
-          </label>
+              <div class="checkbox-row">
+                <label class="checkbox">
+                  <input id="includeRootDir" type="checkbox" checked />
+                  <span>包含根目录</span>
+                </label>
+                <label class="checkbox">
+                  <input id="compressEncrypt" type="checkbox" />
+                  <span>启用加密</span>
+                </label>
+              </div>
 
-          <label for="compressSplitSize">分卷大小 (MiB, 0为不分卷)</label>
-          <input id="compressSplitSize" type="number" min="0" value="0" />
+              <label for="compressPassword">加密密码</label>
+              <input id="compressPassword" type="password" placeholder="启用加密后必填" disabled />
 
-          <label class="checkbox">
-            <input id="compressEncrypt" type="checkbox" />
-            <span>启用加密 (输出 `.enc`)</span>
-          </label>
-
-          <label for="compressPassword">加密密码</label>
-          <input id="compressPassword" type="password" placeholder="启用加密后必填" disabled />
-
-          <div class="submit-row">
-            <button id="compressSubmit" class="primary" type="button">开始压缩</button>
-            <button id="compressAbort" class="danger hidden" type="button">停止</button>
-          </div>
-
-          <div class="progress-panel">
-            <div class="progress-meta">
-              <span id="compressProgressText">等待任务开始</span>
-              <span id="compressProgressPercent">0%</span>
+              <div class="submit-row">
+                <button id="compressSubmit" class="primary" type="button">开始压缩任务</button>
+                <button id="compressAbort" class="danger hidden" type="button">停止</button>
+              </div>
+              
+              <pre id="compressResult" class="result"></pre>
             </div>
-            <div class="progress-track"><div id="compressProgressBar" class="progress-fill"></div></div>
-            <small id="compressProgressStats">-</small>
-          </div>
+          </section>
 
-          <pre id="compressResult" class="result"></pre>
-        </section>
+          <!-- Decompress View -->
+          <section id="view-decompress" class="view-panel">
+            <div class="card">
+              <label for="decompressSource">归档文件</label>
+              <div class="row">
+                <input id="decompressSource" readonly placeholder="请选择或拖入归档文件" />
+                <button id="pickDecompressSource" class="ghost" type="button">选择文件</button>
+                <button id="previewArchive" class="ghost" type="button">预览内容</button>
+              </div>
 
-        <section class="card fade-up" style="--delay: 140ms">
-          <h2>解压</h2>
-          <p class="hint">自动识别 `.zst/.tar.zst` 及 `.enc` 加密版本。</p>
+              <label for="decompressOutput">输出路径 (可选)</label>
+              <div class="row">
+                <input id="decompressOutput" placeholder="留空自动推断" />
+                <button id="pickDecompressOutput" class="ghost" type="button">选择位置</button>
+              </div>
 
-          <label for="decompressSource">归档文件</label>
-          <div class="row">
-            <input id="decompressSource" readonly placeholder="请选择归档文件" />
-            <button id="pickDecompressSource" class="ghost" type="button">选择文件</button>
-            <button id="previewArchive" class="ghost" type="button">预览</button>
-          </div>
+              <label for="decompressPassword">解密密码 (加密包必填)</label>
+              <input id="decompressPassword" type="password" placeholder="仅加密归档需要输入" />
 
-          <label for="decompressOutput">输出路径 (可选)</label>
-          <div class="row">
-            <input id="decompressOutput" placeholder="留空自动推断" />
-            <button id="pickDecompressOutput" class="ghost" type="button">选择位置</button>
-          </div>
+              <div class="submit-row">
+                <button id="decompressSubmit" class="primary" type="button">开始解压任务</button>
+                <button id="decompressAbort" class="danger hidden" type="button">停止</button>
+              </div>
 
-          <label for="decompressPassword">解密密码 (加密包必填)</label>
-          <input id="decompressPassword" type="password" placeholder="仅加密归档需要输入" />
+              <div id="archiveBrowser" class="archive-browser hidden">
+                <h3>归档内容预览</h3>
+                <div class="browser-meta">
+                  <span id="browserFileCount">-</span>
+                  <span id="browserTotalSize">-</span>
+                </div>
+                <div id="browserHash" class="browser-hash"></div>
+                <ul id="browserList" class="browser-list"></ul>
+                <button id="closeBrowser" class="ghost small" type="button">关闭预览</button>
+              </div>
 
-          <div class="submit-row">
-            <button id="decompressSubmit" class="primary" type="button">开始解压</button>
-            <button id="decompressAbort" class="danger hidden" type="button">停止</button>
-          </div>
-
-          <div id="archiveBrowser" class="archive-browser hidden">
-            <h3>归档内容预览</h3>
-            <div class="browser-meta">
-              <span id="browserFileCount">-</span>
-              <span id="browserTotalSize">-</span>
+              <pre id="decompressResult" class="result"></pre>
             </div>
-            <div id="browserHash" class="browser-hash"></div>
-            <ul id="browserList" class="browser-list"></ul>
-            <button id="closeBrowser" class="ghost small" type="button">关闭预览</button>
-          </div>
+          </section>
 
-          <div class="progress-panel">
-            <div class="progress-meta">
-              <span id="decompressProgressText">等待任务开始</span>
-              <span id="decompressProgressPercent">0%</span>
+          <!-- Benchmark View -->
+          <section id="view-benchmark" class="view-panel">
+            <div class="card">
+              <div class="inline-actions">
+                <button id="pickBenchmarkFile" type="button">选择文件</button>
+                <button id="pickBenchmarkDirectory" type="button">选择目录</button>
+                <span id="benchmarkKindTag" class="tag">当前: 文件</span>
+              </div>
+
+              <label for="benchmarkSource">测试源路径</label>
+              <input id="benchmarkSource" readonly placeholder="请选择测试源" />
+
+              <div class="two-col">
+                <div>
+                  <label for="benchmarkMinLevel">最小等级</label>
+                  <input id="benchmarkMinLevel" type="number" min="1" max="22" value="1" />
+                </div>
+                <div>
+                  <label for="benchmarkMaxLevel">最大等级</label>
+                  <input id="benchmarkMaxLevel" type="number" min="1" max="22" value="12" />
+                </div>
+              </div>
+
+              <div class="two-col">
+                <div>
+                  <label for="benchmarkIterations">每等级轮数</label>
+                  <input id="benchmarkIterations" type="number" min="1" max="12" value="2" />
+                </div>
+                <div>
+                  <label for="benchmarkSampleSize">样本大小 (MiB)</label>
+                  <input id="benchmarkSampleSize" type="number" min="4" max="1024" value="64" />
+                </div>
+              </div>
+
+              <div class="submit-row">
+                <button id="benchmarkSubmit" class="primary" type="button">启动快速测试</button>
+                <button id="benchmarkAbort" class="danger hidden" type="button">停止</button>
+              </div>
+
+              <div id="benchmarkSummary" class="summary"></div>
+              <div id="benchmarkBars" class="bars"></div>
             </div>
-            <div class="progress-track"><div id="decompressProgressBar" class="progress-fill"></div></div>
-            <small id="decompressProgressStats">-</small>
-          </div>
-
-          <pre id="decompressResult" class="result"></pre>
-        </section>
-
-        <section class="card benchmark fade-up" style="--delay: 200ms">
-          <h2>快速压缩性能测试</h2>
-          <p class="hint">快速比较多个压缩等级，自动给出平衡吞吐与压缩率的推荐等级。</p>
-
-          <div class="inline-actions">
-            <button id="pickBenchmarkFile" type="button">选择文件</button>
-            <button id="pickBenchmarkDirectory" type="button">选择目录</button>
-            <span id="benchmarkKindTag" class="tag">当前: 文件</span>
-          </div>
-
-          <label for="benchmarkSource">测试源路径</label>
-          <input id="benchmarkSource" readonly placeholder="请选择用于快速测试的源文件/目录" />
-
-          <div class="two-col">
-            <div>
-              <label for="benchmarkMinLevel">最小等级</label>
-              <input id="benchmarkMinLevel" type="number" min="1" max="22" value="1" />
-            </div>
-            <div>
-              <label for="benchmarkMaxLevel">最大等级</label>
-              <input id="benchmarkMaxLevel" type="number" min="1" max="22" value="12" />
-            </div>
-          </div>
-
-          <div class="two-col">
-            <div>
-              <label for="benchmarkIterations">每等级轮数</label>
-              <input id="benchmarkIterations" type="number" min="1" max="12" value="2" />
-            </div>
-            <div>
-              <label for="benchmarkSampleSize">样本大小 (MiB)</label>
-              <input id="benchmarkSampleSize" type="number" min="4" max="1024" value="64" />
-            </div>
-          </div>
-
-          <div class="submit-row">
-            <button id="benchmarkSubmit" class="primary" type="button">开始快速测试</button>
-            <button id="benchmarkAbort" class="danger hidden" type="button">停止</button>
-          </div>
-
-          <div id="benchmarkSummary" class="summary"></div>
-          <div id="benchmarkBars" class="bars"></div>
-        </section>
+          </section>
+        </div>
       </main>
 
-      <footer class="status-wrap fade-up" style="--delay: 260ms">
-        <p id="status" class="status">就绪</p>
-      </footer>
+      <!-- Task Hub (Floating / Sticky) -->
+      <aside id="taskHub" class="task-hub">
+        <header>
+          <h3>任务中心</h3>
+        </header>
+        <div id="activeTasks" class="task-list">
+          <!-- Progress bars will be moved here -->
+          <div id="task-compress" class="task-item hidden">
+            <div class="task-info">
+              <span class="task-name">压缩任务</span>
+              <span id="compressProgressPercent" class="task-percent">0%</span>
+            </div>
+            <div class="progress-track"><div id="compressProgressBar" class="progress-fill"></div></div>
+            <small id="compressProgressText" class="task-status">等待中</small>
+            <small id="compressProgressStats" class="task-stats">-</small>
+          </div>
+
+          <div id="task-decompress" class="task-item hidden">
+            <div class="task-info">
+              <span class="task-name">解压任务</span>
+              <span id="decompressProgressPercent" class="task-percent">0%</span>
+            </div>
+            <div class="progress-track"><div id="decompressProgressBar" class="progress-fill"></div></div>
+            <small id="decompressProgressText" class="task-status">等待中</small>
+            <small id="decompressProgressStats" class="task-stats">-</small>
+          </div>
+
+          <div id="task-benchmark" class="task-item hidden">
+            <div class="task-info">
+              <span class="task-name">性能测试</span>
+            </div>
+            <small id="benchmarkProgressText" class="task-status">正在运行</small>
+          </div>
+        </div>
+      </aside>
     </div>
   </body>
 </html>

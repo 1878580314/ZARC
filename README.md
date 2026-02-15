@@ -1,4 +1,4 @@
-# Z-Archive Nexus (ZARC)
+# Z-Archive Rapid Compressor (ZARC)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
@@ -10,7 +10,7 @@
 
 ## English
 
-ZARC (Z-Archive Nexus) is a high-performance, security-focused archiving suite. It combines the extreme speed of **Zstandard (zstd)** with robust **AES-256-GCM/XChaCha20Poly1305** encryption to provide a modern alternative for data storage and transfer.
+ZARC (Z-Archive Rapid Compressor) is a high-performance, security-focused archiving suite. It combines the extreme speed of **Zstandard (zstd)** with robust **AES-256-GCM/XChaCha20Poly1305** encryption to provide a modern alternative for data storage and transfer.
 
 The project offers two interfaces:
 1.  **ZARC Studio (Desktop)**: A cross-platform GUI built with Tauri, Vite, and Rust.
@@ -49,7 +49,7 @@ The project offers two interfaces:
 
 ## 中文
 
-ZARC (Z-Archive Nexus) 是一款兼顾极致性能与高安全性的现代化存档工具集。它将 **Zstandard (zstd)** 的高速压缩能力与 **AES-256-GCM/XChaCha20Poly1305** 坚固加密相结合，为数据存储与传输提供可靠方案。
+ZARC (Z-Archive Rapid Compressor) 是一款兼顾极致性能与高安全性的现代化存档工具集。它将 **Zstandard (zstd)** 的高速压缩能力与 **AES-256-GCM/XChaCha20Poly1305** 坚固加密相结合，为数据存储与传输提供可靠方案。
 
 本项目提供两种交互方式：
 1.  **ZARC Studio (桌面端)**: 基于 Tauri、Vite 和 Rust 构建的跨平台图形界面应用。

@@ -391,9 +391,12 @@ class ArchiveEngine:
             stats.final_size = dest.stat().st_size
             self._show_summary(stats, success=True, path=dest)
 
-        except Exception as e:
+        except (Exception, KeyboardInterrupt) as e:
             dest.unlink(missing_ok=True)
-            self.console.print(f"\n[error]💥 任务失败: {str(e)}[/error]")
+            if isinstance(e, KeyboardInterrupt):
+                self.console.print("\n[warning]⚠️ 任务被用户终止，已清理残余文件。[/warning]")
+            else:
+                self.console.print(f"\n[error]💥 任务失败: {str(e)}[/error]")
 
     def run_decompress(self, source: Path):
         if not source.exists():
@@ -505,8 +508,17 @@ class ArchiveEngine:
             self.console.print(
                 "\n[error]⛔ 完整性校验失败: 密码错误或数据块被篡改。[/error]"
             )
-        except Exception as e:
-            self.console.print(f"\n[error]💥 错误: {str(e)}[/error]")
+        except (Exception, KeyboardInterrupt) as e:
+            if dest_path.is_dir():
+                import shutil
+                shutil.rmtree(dest_path, ignore_errors=True)
+            else:
+                dest_path.unlink(missing_ok=True)
+            
+            if isinstance(e, KeyboardInterrupt):
+                self.console.print("\n[warning]⚠️ 任务被用户终止，已清理残余文件。[/warning]")
+            else:
+                self.console.print(f"\n[error]💥 错误: {str(e)}[/error]")
 
 
 # --- CLI Commands ---

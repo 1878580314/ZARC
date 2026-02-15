@@ -48,6 +48,9 @@
             <span>目录压缩时包含根目录</span>
           </label>
 
+          <label for="compressSplitSize">分卷大小 (MiB, 0为不分卷)</label>
+          <input id="compressSplitSize" type="number" min="0" value="0" />
+
           <label class="checkbox">
             <input id="compressEncrypt" type="checkbox" />
             <span>启用加密 (输出 `.enc`)</span>

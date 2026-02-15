@@ -68,6 +68,7 @@ const compressLevel = byId<HTMLInputElement>('compressLevel');
 const compressLevelLabel = byId<HTMLSpanElement>('compressLevelLabel');
 const compressKindTag = byId<HTMLSpanElement>('compressKindTag');
 const includeRootDir = byId<HTMLInputElement>('includeRootDir');
+const compressSplitSize = byId<HTMLInputElement>('compressSplitSize');
 const compressEncrypt = byId<HTMLInputElement>('compressEncrypt');
 const compressPassword = byId<HTMLInputElement>('compressPassword');
 const compressResult = byId<HTMLElement>('compressResult');
@@ -276,13 +277,15 @@ function wireEvents() {
     resetProgress('compress', '准备压缩...');
 
     await runTask('正在压缩，请稍候...', async () => {
+      const splitSize = toInt(compressSplitSize.value, 0);
       const report = await invoke<OperationReport>('compress_archive', {
         request: {
           sourcePath: compressSource.value,
           outputPath: emptyToNull(compressOutput.value),
           level: toInt(compressLevel.value, 8),
           includeRootDir: includeRootDir.checked,
-          password
+          password,
+          splitSizeMib: splitSize > 0 ? splitSize : null
         }
       });
       compressResult.textContent = formatOperation(report);

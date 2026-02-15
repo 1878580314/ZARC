@@ -50,6 +50,88 @@ struct CompressRequest {
     level: Option<i32>,
     include_root_dir: Option<bool>,
     password: Option<String>,
+    split_size_mib: Option<u64>,
+}
+
+struct MultiVolumeWriter {
+    base_path: PathBuf,
+    current_file: Option<BufWriter<File>>,
+    current_index: usize,
+    bytes_written_in_volume: u64,
+    volume_limit: u64,
+    total_written: u64,
+}
+
+impl MultiVolumeWriter {
+    fn new(base_path: PathBuf, volume_limit_mib: u64) -> Self {
+        Self {
+            base_path,
+            current_file: None,
+            current_index: 1,
+            bytes_written_in_volume: 0,
+            volume_limit: volume_limit_mib * 1024 * 1024,
+            total_written: 0,
+        }
+    }
+
+    fn ensure_file(&mut self) -> io::Result<&mut BufWriter<File>> {
+        if self.current_file.is_none() {
+            let path = self.volume_path(self.current_index);
+            let file = File::create(path)?;
+            self.current_file = Some(BufWriter::with_capacity(IO_BUFFER_SIZE, file));
+        }
+        Ok(self.current_file.as_mut().unwrap())
+    }
+
+    fn volume_path(&self, index: usize) -> PathBuf {
+        let ext = format!("{:03}", index);
+        let mut path = self.base_path.clone();
+        let new_name = format!("{}.{}", path.file_name().unwrap().to_string_lossy(), ext);
+        path.set_file_name(new_name);
+        path
+    }
+}
+
+impl Write for MultiVolumeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.volume_limit == 0 {
+            let writer = self.ensure_file()?;
+            let n = writer.write(buf)?;
+            self.total_written += n as u64;
+            return Ok(n);
+        }
+
+        let mut written = 0;
+        while written < buf.len() {
+            let remaining_in_vol = self.volume_limit.saturating_sub(self.bytes_written_in_volume);
+            
+            if remaining_in_vol == 0 {
+                if let Some(mut f) = self.current_file.take() {
+                    f.flush()?;
+                }
+                self.current_index += 1;
+                self.bytes_written_in_volume = 0;
+            }
+
+            let writer = self.ensure_file()?;
+            let take = (buf.len() - written).min(remaining_in_vol.max(1) as usize);
+            let n = writer.write(&buf[written..written + take])?;
+            
+            written += n;
+            self.bytes_written_in_volume += n as u64;
+            self.total_written += n as u64;
+
+            if n == 0 { break; }
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(ref mut f) = self.current_file {
+            f.flush()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,12 +204,16 @@ fn list_archive_content_sync(request: DecompressRequest) -> Result<ArchiveConten
     let mut entries = Vec::new();
     let mut total_size = 0u64;
 
-    let input = File::open(&archive)?;
-    let reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
+    let reader: Box<dyn Read> = if meta.is_multi_volume {
+        Box::new(MultiVolumeReader::new(archive.clone()))
+    } else {
+        Box::new(File::open(&archive)?)
+    };
+    let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
 
     match (meta.encrypted, meta.kind) {
         (true, ArchiveKind::TarZst) => {
-            let decrypt_reader = EncryptedReader::new(reader, password.as_deref().unwrap_or_default())?;
+            let decrypt_reader = EncryptedReader::new(buf_reader, password.as_deref().unwrap_or_default())?;
             let decoder = zstd::Decoder::new(decrypt_reader)?;
             let mut tar = tar::Archive::new(decoder);
             for entry in tar.entries()? {
@@ -142,7 +228,7 @@ fn list_archive_content_sync(request: DecompressRequest) -> Result<ArchiveConten
             }
         }
         (false, ArchiveKind::TarZst) => {
-            let decoder = zstd::Decoder::new(reader)?;
+            let decoder = zstd::Decoder::new(buf_reader)?;
             let mut tar = tar::Archive::new(decoder);
             for entry in tar.entries()? {
                 let entry = entry?;
@@ -247,6 +333,7 @@ enum ArchiveKind {
 struct ArchiveMeta {
     kind: ArchiveKind,
     encrypted: bool,
+    is_multi_volume: bool,
 }
 
 struct ProgressState {
@@ -408,6 +495,8 @@ impl<W: Write> Write for CountingWriter<W> {
 enum OutputSink {
     Plain(BufWriter<File>),
     Encrypted(EncryptedWriter<BufWriter<File>>),
+    MultiVolume(MultiVolumeWriter),
+    MultiVolumeEncrypted(EncryptedWriter<MultiVolumeWriter>),
 }
 
 impl OutputSink {
@@ -419,6 +508,12 @@ impl OutputSink {
             Self::Encrypted(writer) => {
                 writer.finish().context("完成加密输出失败")?;
             }
+            Self::MultiVolume(mut writer) => {
+                writer.flush().context("刷新分卷输出失败")?;
+            }
+            Self::MultiVolumeEncrypted(writer) => {
+                writer.finish().context("完成分卷加密输出失败")?;
+            }
         }
         Ok(())
     }
@@ -429,6 +524,8 @@ impl Write for OutputSink {
         match self {
             Self::Plain(writer) => writer.write(buf),
             Self::Encrypted(writer) => writer.write(buf),
+            Self::MultiVolume(writer) => writer.write(buf),
+            Self::MultiVolumeEncrypted(writer) => writer.write(buf),
         }
     }
 
@@ -436,6 +533,8 @@ impl Write for OutputSink {
         match self {
             Self::Plain(writer) => writer.flush(),
             Self::Encrypted(writer) => writer.flush(),
+            Self::MultiVolume(writer) => writer.flush(),
+            Self::MultiVolumeEncrypted(writer) => writer.flush(),
         }
     }
 }
@@ -705,6 +804,7 @@ fn compress_archive_sync(
     let level = request.level.unwrap_or(8).clamp(1, 22);
     let include_root_dir = request.include_root_dir.unwrap_or(true);
     let password = normalize_password(request.password);
+    let split_size_mib = request.split_size_mib;
     let source_bytes = count_source_bytes(&source)?;
     let output =
         resolve_compress_output(&source, request.output_path.as_deref(), password.is_some())?;
@@ -727,6 +827,7 @@ fn compress_archive_sync(
             password.as_deref(),
             &reporter,
             state.as_ref(),
+            split_size_mib,
         )
     } else {
         compress_file(
@@ -736,6 +837,7 @@ fn compress_archive_sync(
             password.as_deref(),
             &reporter,
             state.as_ref(),
+            split_size_mib,
         )
     };
 
@@ -799,10 +901,14 @@ fn decompress_archive_sync(
 
     let started = Instant::now();
 
-    let input =
-        File::open(&archive).with_context(|| format!("无法打开归档文件: {}", archive.display()))?;
-    let reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
-    let progress_reader = ProgressReader::new(reader, reporter.clone());
+    let reader: Box<dyn Read> = if meta.is_multi_volume {
+        Box::new(MultiVolumeReader::new(archive.clone()))
+    } else {
+        Box::new(File::open(&archive).with_context(|| format!("无法打开归档文件: {}", archive.display()))?)
+    };
+    
+    let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
+    let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
     let output_result = match (meta.encrypted, meta.kind) {
         (true, ArchiveKind::TarZst) => {
@@ -985,14 +1091,83 @@ fn make_nonce(prefix: [u8; ENC_NONCE_PREFIX_LEN], counter: u64) -> [u8; 24] {
     nonce
 }
 
-fn create_output_sink(path: &Path, password: Option<&str>) -> Result<OutputSink> {
-    let file =
-        File::create(path).with_context(|| format!("无法创建输出文件: {}", path.display()))?;
-    let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
+fn create_output_sink(path: &Path, password: Option<&str>, split_size_mib: Option<u64>) -> Result<OutputSink> {
+    match (password, split_size_mib) {
+        (Some(pwd), Some(size)) if size > 0 => {
+            let writer = MultiVolumeWriter::new(path.to_path_buf(), size);
+            Ok(OutputSink::MultiVolumeEncrypted(EncryptedWriter::new(writer, pwd)?))
+        }
+        (None, Some(size)) if size > 0 => {
+            Ok(OutputSink::MultiVolume(MultiVolumeWriter::new(path.to_path_buf(), size)))
+        }
+        (Some(pwd), _) => {
+            let file = File::create(path).with_context(|| format!("无法创建输出文件: {}", path.display()))?;
+            let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
+            Ok(OutputSink::Encrypted(EncryptedWriter::new(writer, pwd)?))
+        }
+        (None, _) => {
+            let file = File::create(path).with_context(|| format!("无法创建输出文件: {}", path.display()))?;
+            let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
+            Ok(OutputSink::Plain(writer))
+        }
+    }
+}
 
-    match password {
-        Some(pwd) => Ok(OutputSink::Encrypted(EncryptedWriter::new(writer, pwd)?)),
-        None => Ok(OutputSink::Plain(writer)),
+struct MultiVolumeReader {
+    base_path: PathBuf,
+    current_file: Option<BufReader<File>>,
+    current_index: usize,
+}
+
+impl MultiVolumeReader {
+    fn new(first_volume_path: PathBuf) -> Self {
+        let mut base_path = first_volume_path.clone();
+        let name = base_path.file_name().unwrap().to_string_lossy();
+        if name.ends_with(".001") {
+            let new_name = name.strip_suffix(".001").unwrap().to_string();
+            base_path.set_file_name(new_name);
+        }
+
+        Self {
+            base_path,
+            current_file: None,
+            current_index: 1,
+        }
+    }
+
+    fn open_next(&mut self) -> io::Result<bool> {
+        let ext = format!("{:03}", self.current_index);
+        let mut path = self.base_path.clone();
+        let new_name = format!("{}.{}", path.file_name().unwrap().to_string_lossy(), ext);
+        path.set_file_name(new_name);
+
+        if path.exists() {
+            let file = File::open(path)?;
+            self.current_file = Some(BufReader::with_capacity(IO_BUFFER_SIZE, file));
+            self.current_index += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+impl Read for MultiVolumeReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.current_file.is_none() {
+                if !self.open_next()? {
+                    return Ok(0);
+                }
+            }
+
+            let n = self.current_file.as_mut().unwrap().read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            } else {
+                self.current_file = None;
+            }
+        }
     }
 }
 
@@ -1129,12 +1304,13 @@ fn compress_file(
     password: Option<&str>,
     reporter: &ProgressReporter,
     state: Option<&AppState>,
+    split_size_mib: Option<u64>,
 ) -> Result<()> {
     let input =
         File::open(source).with_context(|| format!("无法打开源文件: {}", source.display()))?;
     let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
 
-    let output_sink = create_output_sink(output, password)?;
+    let output_sink = create_output_sink(output, password, split_size_mib)?;
     let mut encoder = zstd::Encoder::new(output_sink, level).context("创建 zstd 编码器失败")?;
 
     let threads = num_cpus::get().max(1) as u32;
@@ -1175,8 +1351,9 @@ fn compress_directory(
     password: Option<&str>,
     reporter: &ProgressReporter,
     state: Option<&AppState>,
+    split_size_mib: Option<u64>,
 ) -> Result<()> {
-    let output_sink = create_output_sink(output, password)?;
+    let output_sink = create_output_sink(output, password, split_size_mib)?;
     let mut encoder = zstd::Encoder::new(output_sink, level).context("创建 zstd 编码器失败")?;
 
     let threads = num_cpus::get().max(1) as u32;
@@ -1356,11 +1533,22 @@ fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {
         .map(|v| v.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    let encrypted = name.ends_with(".enc");
+    // Check for multi-volume suffix .001, .002 ...
+    let is_multi = name.len() > 4 && name.as_bytes()[name.len()-4] == b'.' 
+        && name.as_bytes()[name.len()-3].is_ascii_digit()
+        && name.as_bytes()[name.len()-2].is_ascii_digit()
+        && name.as_bytes()[name.len()-1].is_ascii_digit();
+
+    let mut meta_name = name.clone();
+    if is_multi {
+        meta_name = name[..name.len()-4].to_string();
+    }
+
+    let encrypted = meta_name.ends_with(".enc");
     let base = if encrypted {
-        name.strip_suffix(".enc").unwrap_or(&name)
+        meta_name.strip_suffix(".enc").unwrap_or(&meta_name)
     } else {
-        &name
+        &meta_name
     };
 
     let kind = if base.ends_with(".tar.zst") {
@@ -1371,7 +1559,7 @@ fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {
         bail!("不支持的文件类型，仅支持 .zst/.tar.zst 及其 .enc 加密版本")
     };
 
-    Ok(ArchiveMeta { kind, encrypted })
+    Ok(ArchiveMeta { kind, encrypted, is_multi_volume: is_multi })
 }
 
 fn resolve_compress_output(

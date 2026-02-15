@@ -1817,7 +1817,9 @@ mod tests {
                     level: Some(8),
                     include_root_dir: Some(true),
                     password: Some("Strong#Pass123".to_string()),
+                    split_size_mib: None,
                 },
+                None,
                 None,
             )
             .expect("compress encrypted");
@@ -1828,6 +1830,7 @@ mod tests {
                     output_path: Some(path_to_string(&output)),
                     password: Some("Strong#Pass123".to_string()),
                 },
+                None,
                 None,
             )
             .expect("decompress encrypted");
@@ -1870,7 +1873,9 @@ mod tests {
                     level: Some(6),
                     include_root_dir: Some(include_root),
                     password: Some("Dir#Secure987".to_string()),
+                    split_size_mib: None,
                 },
+                None,
                 None,
             )
             .expect("compress dir encrypted");
@@ -1881,6 +1886,7 @@ mod tests {
                     output_path: Some(path_to_string(&out_dir)),
                     password: Some("Dir#Secure987".to_string()),
                 },
+                None,
                 None,
             )
             .expect("decompress dir encrypted");
@@ -1910,7 +1916,9 @@ mod tests {
                 level: Some(5),
                 include_root_dir: Some(true),
                 password: Some("CorrectPassword".to_string()),
+                split_size_mib: None,
             },
+            None,
             None,
         )
         .expect("compress encrypted");
@@ -1921,6 +1929,7 @@ mod tests {
                 output_path: Some(path_to_string(&output)),
                 password: Some("WrongPassword".to_string()),
             },
+            None,
             None,
         )
         .expect_err("wrong password must fail");
@@ -1945,7 +1954,9 @@ mod tests {
                 level: Some(9),
                 include_root_dir: Some(true),
                 password: None,
+                split_size_mib: None,
             },
+            None,
             None,
         )
         .expect("compress plain");
@@ -1956,6 +1967,7 @@ mod tests {
                 output_path: Some(path_to_string(&output)),
                 password: None,
             },
+            None,
             None,
         )
         .expect("decompress plain");
@@ -1969,14 +1981,17 @@ mod tests {
         let source_path = temp.path().join("blob.bin");
         write_file(&source_path, &deterministic_bytes(2 * 1024 * 1024));
 
-        let report = benchmark_compression_sync(BenchmarkRequest {
-            source_path: path_to_string(&source_path),
-            min_level: Some(1),
-            max_level: Some(4),
-            iterations: Some(1),
-            sample_size_mib: Some(16),
-            threads: Some(1),
-        })
+        let report = benchmark_compression_sync(
+            BenchmarkRequest {
+                source_path: path_to_string(&source_path),
+                min_level: Some(1),
+                max_level: Some(4),
+                iterations: Some(1),
+                sample_size_mib: Some(16),
+                threads: Some(1),
+            },
+            None,
+        )
         .expect("benchmark");
 
         assert_eq!(report.results.len(), 4);

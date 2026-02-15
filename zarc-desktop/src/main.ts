@@ -14,6 +14,20 @@ interface OperationReport {
   durationMs: number;
   throughputMiBs: number;
   compressionRatio: number | null;
+  blake3Hash: string | null;
+}
+
+interface ArchiveEntry {
+  path: string;
+  size: number;
+  isDir: boolean;
+}
+
+interface ArchiveContentReport {
+  entries: ArchiveEntry[];
+  totalFiles: number;
+  uncompressedSize: number;
+  hash: string;
 }
 
 interface ProgressPayload {
@@ -94,8 +108,65 @@ const abortButtons = {
   benchmark: byId<HTMLButtonElement>('benchmarkAbort')
 };
 
+const themeToggle = byId<HTMLButtonElement>('themeToggle');
+
+const previewArchive = byId<HTMLButtonElement>('previewArchive');
+const archiveBrowser = byId<HTMLElement>('archiveBrowser');
+const browserFileCount = byId<HTMLElement>('browserFileCount');
+const browserTotalSize = byId<HTMLElement>('browserTotalSize');
+const browserHash = byId<HTMLElement>('browserHash');
+const browserList = byId<HTMLElement>('browserList');
+const closeBrowser = byId<HTMLButtonElement>('closeBrowser');
+
 void initProgressEvents();
+void initDragAndDrop();
+void initTheme();
 wireEvents();
+
+function initTheme() {
+  const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', savedTheme);
+  
+  themeToggle.addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme');
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('theme', next);
+  });
+}
+
+async function initDragAndDrop() {
+  await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
+    const paths = event.payload.paths;
+    if (paths.length > 0) {
+      const path = paths[0];
+      // Logic: if it's a known archive format, set to decompress. Otherwise set to compress.
+      const isArchive = path.toLowerCase().endsWith('.zst') || path.toLowerCase().endsWith('.enc');
+      
+      if (isArchive) {
+        decompressSource.value = path;
+        // Optionally switch tab/view if we had tabs
+      } else {
+        compressSource.value = path;
+        benchmarkSource.value = path;
+        // Update kind tag based on extension (simple heuristic)
+        // Since we don't know if it's a dir here easily without invoke, we can just set the path.
+      }
+      setStatus(`已加载拖入的路径: ${path}`, 'success');
+    }
+  });
+
+  // Visual feedback for drag over (can be added with CSS classes on body)
+  await listen('tauri://drag-enter', () => {
+    document.body.style.filter = 'contrast(0.9) brightness(0.9)';
+  });
+  await listen('tauri://drag-leave', () => {
+    document.body.style.filter = '';
+  });
+  await listen('tauri://drag-drop', () => {
+    document.body.style.filter = '';
+  });
+}
 
 function wireEvents() {
   // Wire abort buttons
@@ -113,6 +184,44 @@ function wireEvents() {
     void invoke('abort_task');
     abortButtons.benchmark.disabled = true;
     abortButtons.benchmark.textContent = '正在停止...';
+  });
+
+  previewArchive.addEventListener('click', async () => {
+    if (!decompressSource.value) {
+      setStatus('请先选择归档文件。', 'error');
+      return;
+    }
+
+    setBusy('正在读取归档列表...');
+    try {
+      const report = await invoke<ArchiveContentReport>('list_archive_content', {
+        request: {
+          archivePath: decompressSource.value,
+          password: emptyToNull(decompressPassword.value)
+        }
+      });
+
+      browserFileCount.textContent = `文件数: ${report.totalFiles}`;
+      browserTotalSize.textContent = `解压大小: ${formatBytes(report.uncompressedSize)}`;
+      browserHash.textContent = `BLAKE3: ${report.hash}`;
+      
+      browserList.innerHTML = '';
+      report.entries.forEach(entry => {
+        const li = document.createElement('li');
+        if (entry.isDir) li.className = 'dir';
+        li.innerHTML = `<span>${entry.path}</span> <small>${formatBytes(entry.size)}</small>`;
+        browserList.appendChild(li);
+      });
+
+      archiveBrowser.classList.remove('hidden');
+      setStatus('归档预览已加载。', 'success');
+    } catch (error) {
+      setStatus(normalizeError(error), 'error');
+    }
+  });
+
+  closeBrowser.addEventListener('click', () => {
+    archiveBrowser.classList.add('hidden');
   });
 
   compressLevel.addEventListener('input', () => {
@@ -398,7 +507,7 @@ async function runTask(
 
 function formatOperation(report: OperationReport): string {
   const ratio = report.compressionRatio === null ? '-' : `${report.compressionRatio.toFixed(2)}%`;
-  return [
+  const lines = [
     `操作: ${report.operation}`,
     `源路径: ${report.sourcePath}`,
     `输出路径: ${report.outputPath}`,
@@ -407,7 +516,11 @@ function formatOperation(report: OperationReport): string {
     `压缩率: ${ratio}`,
     `耗时: ${report.durationMs.toFixed(2)} ms`,
     `吞吐: ${report.throughputMiBs.toFixed(2)} MiB/s`
-  ].join('\n');
+  ];
+  if (report.blake3Hash) {
+    lines.push(`BLAKE3: ${report.blake3Hash}`);
+  }
+  return lines.join('\n');
 }
 
 function setActionsDisabled(disabled: boolean) {

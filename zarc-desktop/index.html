@@ -12,7 +12,10 @@
     <div class="orb orb-b"></div>
     <div class="app">
       <header class="hero fade-up">
-        <p class="eyebrow">Rust + Tauri • Cross Platform</p>
+        <div class="header-top">
+          <p class="eyebrow">Rust + Tauri • Cross Platform</p>
+          <button id="themeToggle" class="ghost small-icon" type="button" title="切换主题">🌓</button>
+        </div>
         <h1>ZARC Studio</h1>
         <p class="subtitle">高性能压缩解压、实时进度、快速等级推荐与加密保护</p>
       </header>
@@ -78,6 +81,7 @@
           <div class="row">
             <input id="decompressSource" readonly placeholder="请选择归档文件" />
             <button id="pickDecompressSource" class="ghost" type="button">选择文件</button>
+            <button id="previewArchive" class="ghost" type="button">预览</button>
           </div>
 
           <label for="decompressOutput">输出路径 (可选)</label>
@@ -92,6 +96,17 @@
           <div class="submit-row">
             <button id="decompressSubmit" class="primary" type="button">开始解压</button>
             <button id="decompressAbort" class="danger hidden" type="button">停止</button>
+          </div>
+
+          <div id="archiveBrowser" class="archive-browser hidden">
+            <h3>归档内容预览</h3>
+            <div class="browser-meta">
+              <span id="browserFileCount">-</span>
+              <span id="browserTotalSize">-</span>
+            </div>
+            <div id="browserHash" class="browser-hash"></div>
+            <ul id="browserList" class="browser-list"></ul>
+            <button id="closeBrowser" class="ghost small" type="button">关闭预览</button>
           </div>
 
           <div class="progress-panel">

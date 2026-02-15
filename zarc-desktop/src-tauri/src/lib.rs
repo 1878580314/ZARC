@@ -25,6 +25,23 @@ const ENC_NONCE_PREFIX_LEN: usize = 16;
 const ENC_KEY_LEN: usize = 32;
 const ENC_CHUNK_SIZE: usize = 256 * 1024;
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveEntry {
+    path: String,
+    size: u64,
+    is_dir: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveContentReport {
+    entries: Vec<ArchiveEntry>,
+    total_files: usize,
+    uncompressed_size: u64,
+    hash: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompressRequest {
@@ -65,6 +82,96 @@ struct OperationReport {
     duration_ms: f64,
     throughput_mi_bs: f64,
     compression_ratio: Option<f64>,
+    blake3_hash: Option<String>,
+}
+
+#[tauri::command]
+async fn list_archive_content(
+    request: DecompressRequest,
+) -> std::result::Result<ArchiveContentReport, String> {
+    tauri::async_runtime::spawn_blocking(move || list_archive_content_sync(request))
+        .await
+        .map_err(|err| format!("任务线程异常: {err}"))?
+        .map_err(|err| err.to_string())
+}
+
+fn list_archive_content_sync(request: DecompressRequest) -> Result<ArchiveContentReport> {
+    let archive = PathBuf::from(request.archive_path.trim());
+    if !archive.exists() {
+        bail!("归档文件不存在: {}", archive.display());
+    }
+
+    let meta = detect_archive_meta(&archive)?;
+    let password = normalize_password(request.password);
+    if meta.encrypted && password.is_none() {
+        bail!("该归档已加密，请提供解密密码以预览内容");
+    }
+
+    let mut hasher = blake3::Hasher::new();
+    
+    // Hash the archive file itself
+    let mut hash_buf = [0u8; 64 * 1024];
+    let mut hash_reader = File::open(&archive)?;
+    loop {
+        let n = hash_reader.read(&mut hash_buf)?;
+        if n == 0 { break; }
+        hasher.update(&hash_buf[..n]);
+    }
+    let archive_hash = hasher.finalize().to_hex().to_string();
+
+    let mut entries = Vec::new();
+    let mut total_size = 0u64;
+
+    let input = File::open(&archive)?;
+    let reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
+
+    match (meta.encrypted, meta.kind) {
+        (true, ArchiveKind::TarZst) => {
+            let decrypt_reader = EncryptedReader::new(reader, password.as_deref().unwrap_or_default())?;
+            let decoder = zstd::Decoder::new(decrypt_reader)?;
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let entry = entry?;
+                let header = entry.header();
+                entries.push(ArchiveEntry {
+                    path: entry.path()?.to_string_lossy().to_string(),
+                    size: entry.size(),
+                    is_dir: header.entry_type().is_dir(),
+                });
+                total_size += entry.size();
+            }
+        }
+        (false, ArchiveKind::TarZst) => {
+            let decoder = zstd::Decoder::new(reader)?;
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let entry = entry?;
+                let header = entry.header();
+                entries.push(ArchiveEntry {
+                    path: entry.path()?.to_string_lossy().to_string(),
+                    size: entry.size(),
+                    is_dir: header.entry_type().is_dir(),
+                });
+                total_size += entry.size();
+            }
+        }
+        (_, ArchiveKind::Zst) => {
+            // Single file zst doesn't store filename inside usually in this impl
+            entries.push(ArchiveEntry {
+                path: archive.file_stem().unwrap_or_default().to_string_lossy().replace(".tar", ""),
+                size: 0, // Unknown without full decompression
+                is_dir: false,
+            });
+        }
+    }
+
+    let total_files = entries.len();
+    Ok(ArchiveContentReport {
+        entries,
+        total_files,
+        uncompressed_size: total_size,
+        hash: archive_hash,
+    })
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -645,6 +752,8 @@ fn compress_archive_sync(
         .with_context(|| format!("无法读取结果文件信息: {}", output.display()))?
         .len();
 
+    let hash = calculate_file_hash(&output).ok();
+
     Ok(OperationReport {
         operation: "compress".to_string(),
         source_path: path_to_string(&source),
@@ -654,6 +763,7 @@ fn compress_archive_sync(
         duration_ms: duration * 1000.0,
         throughput_mi_bs: throughput(source_bytes, duration),
         compression_ratio: Some(ratio(output_bytes, source_bytes)),
+        blake3_hash: hash,
     })
 }
 
@@ -735,6 +845,7 @@ fn decompress_archive_sync(
     reporter.finish();
 
     let duration = started.elapsed().as_secs_f64();
+    let hash = calculate_file_hash(&archive).ok();
 
     Ok(OperationReport {
         operation: "decompress".to_string(),
@@ -745,7 +856,21 @@ fn decompress_archive_sync(
         duration_ms: duration * 1000.0,
         throughput_mi_bs: throughput(output_bytes.max(source_bytes), duration),
         compression_ratio: None,
+        blake3_hash: hash,
     })
+}
+
+fn calculate_file_hash(path: &Path) -> Result<String> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn benchmark_compression_sync(
@@ -1425,7 +1550,8 @@ pub fn run() {
             compress_archive,
             decompress_archive,
             benchmark_compression,
-            abort_task
+            abort_task,
+            list_archive_content
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

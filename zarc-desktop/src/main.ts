@@ -87,17 +87,6 @@ const benchmarkSampleSize = byId<HTMLInputElement>('benchmarkSampleSize');
 const benchmarkSummary = byId<HTMLElement>('benchmarkSummary');
 const benchmarkBars = byId<HTMLElement>('benchmarkBars');
 
-const compressProgressBar = byId<HTMLElement>('compressProgressBar');
-const compressProgressPercent = byId<HTMLElement>('compressProgressPercent');
-const compressProgressText = byId<HTMLElement>('compressProgressText');
-const compressProgressStats = byId<HTMLElement>('compressProgressStats');
-
-const decompressProgressBar = byId<HTMLElement>('decompressProgressBar');
-const decompressProgressPercent = byId<HTMLElement>('decompressProgressPercent');
-const decompressProgressText = byId<HTMLElement>('decompressProgressText');
-const decompressProgressStats = byId<HTMLElement>('decompressProgressStats');
-
-const statusEl = byId<HTMLElement>('status');
 const actionButtons = [
   byId<HTMLButtonElement>('compressSubmit'),
   byId<HTMLButtonElement>('decompressSubmit'),
@@ -457,7 +446,7 @@ function wireEvents() {
       return;
     }
 
-    resetProgress('compress', '准备压缩...');
+    resetProgress('compress');
 
     await runTask('正在压缩，请稍候...', async () => {
       const splitSize = toInt(compressSplitSize.value, 0);
@@ -501,7 +490,7 @@ function wireEvents() {
       return;
     }
 
-    resetProgress('decompress', '准备解压...');
+    resetProgress('decompress');
 
     await runTask('正在解压，请稍候...', async () => {
       const report = await invoke<OperationReport>('decompress_archive', {
@@ -596,7 +585,7 @@ function updateProgress(kind: ProgressKind, payload: ProgressPayload) {
     `${payload.throughputMiBs.toFixed(2)} MiB/s • ETA ${etaText}`;
 }
 
-function resetProgress(kind: ProgressKind, text: string) {
+function resetProgress(kind: ProgressKind) {
   const taskItem = taskItems[kind];
   taskItem.classList.remove('hidden');
   
@@ -620,7 +609,6 @@ function renderBenchmark(report: CompressionBenchmarkReport) {
   }
 
   const bestThroughput = Math.max(...report.results.map((r) => r.meanThroughputMiBs));
-  const bestRatio = Math.min(...report.results.map((r) => r.ratioPercent));
 
   benchmarkSummary.innerHTML = `
     <div class="summary-grid">

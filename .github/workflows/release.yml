@@ -101,22 +101,9 @@ jobs:
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
 
-  build-cli:
-    name: Prepare CLI Script
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Upload CLI Script
-        uses: actions/upload-artifact@v4
-        with:
-          name: zarc-cli-python
-          path: zstd.py
-
   publish:
     name: Publish Release
-    needs: [build-desktop, build-cli]
+    needs: [build-desktop]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:

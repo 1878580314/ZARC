@@ -4,6 +4,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import './style.css';
 
 type ProgressKind = 'compress' | 'decompress' | 'benchmark';
+type OutputKind = 'archive' | 'sfxExe';
 
 interface OperationReport {
   operation: string;
@@ -28,6 +29,14 @@ interface ArchiveContentReport {
   totalFiles: number;
   uncompressedSize: number;
   hash: string;
+}
+
+interface EmbeddedArchiveInfo {
+  hostPath: string;
+  payloadBytes: number;
+  defaultExtractName: string;
+  encrypted: boolean;
+  archiveKind: string;
 }
 
 interface ProgressPayload {
@@ -64,6 +73,7 @@ interface CompressionBenchmarkReport {
 
 const compressSource = byId<HTMLInputElement>('compressSource');
 const compressOutput = byId<HTMLInputElement>('compressOutput');
+const compressOutputKind = byId<HTMLSelectElement>('compressOutputKind');
 const compressLevel = byId<HTMLInputElement>('compressLevel');
 const compressLevelLabel = byId<HTMLSpanElement>('compressLevelLabel');
 const compressKindTag = byId<HTMLSpanElement>('compressKindTag');
@@ -74,11 +84,14 @@ const compressPassword = byId<HTMLInputElement>('compressPassword');
 const enableLogging = byId<HTMLInputElement>('enableLogging');
 const deleteSourceAfter = byId<HTMLInputElement>('deleteSourceAfter');
 const compressResult = byId<HTMLElement>('compressResult');
+const compressModeHint = byId<HTMLElement>('compressModeHint');
 
 const decompressSource = byId<HTMLInputElement>('decompressSource');
 const decompressOutput = byId<HTMLInputElement>('decompressOutput');
 const decompressPassword = byId<HTMLInputElement>('decompressPassword');
 const decompressResult = byId<HTMLElement>('decompressResult');
+const sfxBanner = byId<HTMLElement>('sfxBanner');
+const sfxMeta = byId<HTMLElement>('sfxMeta');
 
 const benchmarkSource = byId<HTMLInputElement>('benchmarkSource');
 const benchmarkKindTag = byId<HTMLSpanElement>('benchmarkKindTag');
@@ -129,12 +142,14 @@ const benchmarkChart = byId<HTMLElement>('benchmarkChart');
 
 let currentArchiveEntries: ArchiveEntry[] = [];
 let currentPath = '';
+let embeddedArchiveInfo: EmbeddedArchiveInfo | null = null;
 
 void initProgressEvents();
 void initDragAndDrop();
 void initTheme();
 void initViewSwitcher();
 wireEvents();
+void initEmbeddedArchiveMode();
 
 function renderBrowser() {
   browserList.innerHTML = '';
@@ -311,6 +326,10 @@ function initTheme() {
 
 async function initDragAndDrop() {
   await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
+    if (embeddedArchiveInfo) {
+      return;
+    }
+
     const paths = event.payload.paths;
     masterDropZone.classList.add('hidden');
     
@@ -337,6 +356,31 @@ async function initDragAndDrop() {
   await listen('tauri://drag-leave', () => {
     masterDropZone.classList.add('hidden');
   });
+}
+
+async function initEmbeddedArchiveMode() {
+  try {
+    const info = await invoke<EmbeddedArchiveInfo | null>('get_embedded_archive_info');
+    if (!info) {
+      syncCompressOutputMode();
+      return;
+    }
+
+    embeddedArchiveInfo = info;
+    document.body.classList.add('sfx-mode');
+    sfxBanner.classList.remove('hidden');
+    sfxMeta.textContent = `${info.archiveKind} • ${formatBytes(info.payloadBytes)} • 默认输出 ${info.defaultExtractName}${info.encrypted ? ' • 已加密' : ''}`;
+    decompressSource.value = info.hostPath;
+    decompressOutput.placeholder = `请选择输出目录，将生成 ${info.defaultExtractName}`;
+    byId<HTMLButtonElement>('pickDecompressSource').disabled = true;
+    previewArchive.disabled = true;
+    switchView('decompress');
+    setStatus('已进入自解压模式。请选择输出目录后开始解压。', 'success');
+  } catch (error) {
+    console.error('Failed to detect embedded archive mode', error);
+  } finally {
+    syncCompressOutputMode();
+  }
 }
 
 function wireEvents() {
@@ -410,6 +454,10 @@ function wireEvents() {
     }
   });
 
+  compressOutputKind.addEventListener('change', () => {
+    syncCompressOutputMode();
+  });
+
   byId<HTMLButtonElement>('pickCompressFile').addEventListener('click', async () => {
     compressKindTag.textContent = '当前: 文件';
     const selected = await open({ title: '选择待压缩文件', multiple: false, directory: false });
@@ -427,9 +475,13 @@ function wireEvents() {
   });
 
   byId<HTMLButtonElement>('pickCompressOutput').addEventListener('click', async () => {
+    const outputKind = currentCompressOutputKind();
     const selected = await save({
       title: '压缩输出路径',
-      filters: [{ name: 'Archive', extensions: ['zst', 'enc'] }]
+      filters:
+        outputKind === 'sfxExe'
+          ? [{ name: 'Windows Self Extracting EXE', extensions: ['exe'] }]
+          : [{ name: 'Archive', extensions: ['zst', 'enc'] }]
     });
     if (typeof selected === 'string') {
       compressOutput.value = selected;
@@ -451,11 +503,13 @@ function wireEvents() {
     resetProgress('compress');
 
     await runTask('正在压缩，请稍候...', async () => {
-      const splitSize = toInt(compressSplitSize.value, 0);
+      const outputKind = currentCompressOutputKind();
+      const splitSize = outputKind === 'sfxExe' ? 0 : toInt(compressSplitSize.value, 0);
       const report = await invoke<OperationReport>('compress_archive', {
         request: {
           sourcePath: compressSource.value,
           outputPath: emptyToNull(compressOutput.value),
+          outputKind,
           level: toInt(compressLevel.value, 8),
           includeRootDir: includeRootDir.checked,
           password,
@@ -489,21 +543,32 @@ function wireEvents() {
   });
 
   byId<HTMLButtonElement>('decompressSubmit').addEventListener('click', async () => {
-    if (!decompressSource.value) {
+    if (!embeddedArchiveInfo && !decompressSource.value) {
       setStatus('请先选择归档文件。', 'error');
+      return;
+    }
+    if (embeddedArchiveInfo && !decompressOutput.value.trim()) {
+      setStatus('请选择解压输出目录。', 'error');
       return;
     }
 
     resetProgress('decompress');
 
     await runTask('正在解压，请稍候...', async () => {
-      const report = await invoke<OperationReport>('decompress_archive', {
-        request: {
-          archivePath: decompressSource.value,
-          outputPath: emptyToNull(decompressOutput.value),
-          password: emptyToNull(decompressPassword.value)
-        }
-      });
+      const report = embeddedArchiveInfo
+        ? await invoke<OperationReport>('extract_embedded_archive', {
+            request: {
+              outputPath: emptyToNull(decompressOutput.value),
+              password: emptyToNull(decompressPassword.value)
+            }
+          })
+        : await invoke<OperationReport>('decompress_archive', {
+            request: {
+              archivePath: decompressSource.value,
+              outputPath: emptyToNull(decompressOutput.value),
+              password: emptyToNull(decompressPassword.value)
+            }
+          });
       decompressResult.textContent = formatOperation(report);
       setStatus(`解压完成: ${report.outputPath}`, 'success');
     }, 'decompress');
@@ -717,6 +782,21 @@ function normalizeError(error: unknown): string {
     return String(error);
   }
   return '发生未知错误。';
+}
+
+function currentCompressOutputKind(): OutputKind {
+  return compressOutputKind.value === 'sfxExe' ? 'sfxExe' : 'archive';
+}
+
+function syncCompressOutputMode() {
+  const isSfx = currentCompressOutputKind() === 'sfxExe';
+  compressSplitSize.disabled = isSfx;
+  if (isSfx) {
+    compressSplitSize.value = '0';
+  }
+  compressModeHint.textContent = isSfx
+    ? 'Windows 自解压 EXE 会生成单个 .exe 文件，双击后进入解压模式；当前版本不支持分卷。'
+    : '普通归档支持当前 `.zst/.tar.zst/.enc` 输出格式，并保留分卷能力。';
 }
 
 function byId<T extends HTMLElement>(id: string): T {

@@ -70,6 +70,13 @@
 
               <div class="settings-grid">
                 <div>
+                  <label for="compressOutputKind">输出模式</label>
+                  <select id="compressOutputKind">
+                    <option value="archive">普通归档</option>
+                    <option value="sfxExe">Windows 自解压 EXE</option>
+                  </select>
+                </div>
+                <div>
                   <label for="compressLevel">压缩等级: <span id="compressLevelLabel">8</span></label>
                   <input id="compressLevel" type="range" min="1" max="22" value="8" />
                 </div>
@@ -78,6 +85,10 @@
                   <input id="compressSplitSize" type="number" min="0" value="0" />
                 </div>
               </div>
+
+              <p id="compressModeHint" class="hint">
+                普通归档支持分卷与现有 `.zst/.enc` 输出；Windows 自解压 EXE 会生成单个 `.exe` 文件，并禁用分卷。
+              </p>
 
               <div class="checkbox-row">
                 <label class="checkbox">
@@ -113,6 +124,11 @@
           <!-- Decompress View -->
           <section id="view-decompress" class="view-panel">
             <div class="card">
+              <div id="sfxBanner" class="sfx-banner hidden">
+                <strong>当前文件为自解压包</strong>
+                <span id="sfxMeta">-</span>
+              </div>
+
               <label for="decompressSource">归档文件</label>
               <div class="row">
                 <input id="decompressSource" readonly placeholder="请选择或拖入归档文件" />

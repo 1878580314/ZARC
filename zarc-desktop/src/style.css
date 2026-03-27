@@ -298,6 +298,25 @@ h2 {
   font-size: 0.92rem;
 }
 
+.sfx-banner {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(13, 148, 136, 0.22);
+  background: linear-gradient(135deg, rgba(13, 148, 136, 0.1), rgba(59, 130, 246, 0.08));
+}
+
+.sfx-banner strong {
+  font-size: 0.98rem;
+}
+
+.sfx-banner span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 label {
   display: block;
   margin-bottom: 8px;
@@ -579,6 +598,21 @@ button.ghost {
 
 .hidden {
   display: none !important;
+}
+
+body.sfx-mode .sidebar,
+body.sfx-mode .task-hub,
+body.sfx-mode #view-compress,
+body.sfx-mode #view-benchmark {
+  display: none !important;
+}
+
+body.sfx-mode .content {
+  padding: 40px 48px;
+}
+
+body.sfx-mode .card {
+  max-width: 920px;
 }
 
 .submit-row {

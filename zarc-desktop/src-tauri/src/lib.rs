@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use walkdir::WalkDir;
 
+mod sfx;
+
 const IO_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const MIB: f64 = 1024.0 * 1024.0;
 const PROGRESS_EVENT: &str = "zarc://progress";
@@ -47,12 +49,26 @@ struct ArchiveContentReport {
 struct CompressRequest {
     source_path: String,
     output_path: Option<String>,
+    output_kind: Option<OutputKind>,
     level: Option<i32>,
     include_root_dir: Option<bool>,
     password: Option<String>,
     split_size_mib: Option<u64>,
     enable_logging: Option<bool>,
     delete_source_after: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum OutputKind {
+    Archive,
+    SfxExe,
+}
+
+impl OutputKind {
+    fn archive_or_default(raw: Option<Self>) -> Self {
+        raw.unwrap_or(Self::Archive)
+    }
 }
 
 struct MultiVolumeWriter {
@@ -105,8 +121,10 @@ impl Write for MultiVolumeWriter {
 
         let mut written = 0;
         while written < buf.len() {
-            let remaining_in_vol = self.volume_limit.saturating_sub(self.bytes_written_in_volume);
-            
+            let remaining_in_vol = self
+                .volume_limit
+                .saturating_sub(self.bytes_written_in_volume);
+
             if remaining_in_vol == 0 {
                 if let Some(mut f) = self.current_file.take() {
                     f.flush()?;
@@ -118,12 +136,14 @@ impl Write for MultiVolumeWriter {
             let writer = self.ensure_file()?;
             let take = (buf.len() - written).min(remaining_in_vol.max(1) as usize);
             let n = writer.write(&buf[written..written + take])?;
-            
+
             written += n;
             self.bytes_written_in_volume += n as u64;
             self.total_written += n as u64;
 
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
         }
         Ok(written)
     }
@@ -140,6 +160,13 @@ impl Write for MultiVolumeWriter {
 #[serde(rename_all = "camelCase")]
 struct DecompressRequest {
     archive_path: String,
+    output_path: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddedDecompressRequest {
     output_path: Option<String>,
     password: Option<String>,
 }
@@ -169,6 +196,16 @@ struct OperationReport {
     blake3_hash: Option<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddedArchiveInfo {
+    host_path: String,
+    payload_bytes: u64,
+    default_extract_name: String,
+    encrypted: bool,
+    archive_kind: String,
+}
+
 #[tauri::command]
 async fn list_archive_content(
     request: DecompressRequest,
@@ -192,13 +229,15 @@ fn list_archive_content_sync(request: DecompressRequest) -> Result<ArchiveConten
     }
 
     let mut hasher = blake3::Hasher::new();
-    
+
     // Hash the archive file itself
     let mut hash_buf = [0u8; 64 * 1024];
     let mut hash_reader = File::open(&archive)?;
     loop {
         let n = hash_reader.read(&mut hash_buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&hash_buf[..n]);
     }
     let archive_hash = hasher.finalize().to_hex().to_string();
@@ -215,7 +254,8 @@ fn list_archive_content_sync(request: DecompressRequest) -> Result<ArchiveConten
 
     match (meta.encrypted, meta.kind) {
         (true, ArchiveKind::TarZst) => {
-            let decrypt_reader = EncryptedReader::new(buf_reader, password.as_deref().unwrap_or_default())?;
+            let decrypt_reader =
+                EncryptedReader::new(buf_reader, password.as_deref().unwrap_or_default())?;
             let decoder = zstd::Decoder::new(decrypt_reader)?;
             let mut tar = tar::Archive::new(decoder);
             for entry in tar.entries()? {
@@ -246,7 +286,11 @@ fn list_archive_content_sync(request: DecompressRequest) -> Result<ArchiveConten
         (_, ArchiveKind::Zst) => {
             // Single file zst doesn't store filename inside usually in this impl
             entries.push(ArchiveEntry {
-                path: archive.file_stem().unwrap_or_default().to_string_lossy().replace(".tar", ""),
+                path: archive
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .replace(".tar", ""),
                 size: 0, // Unknown without full decompression
                 is_dir: false,
             });
@@ -325,7 +369,8 @@ impl AppState {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 enum ArchiveKind {
     TarZst,
     Zst,
@@ -776,16 +821,39 @@ async fn decompress_archive(
 }
 
 #[tauri::command]
+fn get_embedded_archive_info() -> std::result::Result<Option<EmbeddedArchiveInfo>, String> {
+    sfx::load_embedded_archive_info_from_current_exe().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn extract_embedded_archive(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: EmbeddedDecompressRequest,
+) -> std::result::Result<OperationReport, String> {
+    state.reset_abort();
+    let state_inner = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        sfx::extract_embedded_archive_from_current_exe(request, Some(app), Some(state_inner))
+    })
+    .await
+    .map_err(|err| format!("任务线程异常: {err}"))?
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn benchmark_compression(
     state: State<'_, AppState>,
     request: BenchmarkRequest,
 ) -> std::result::Result<BenchmarkReport, String> {
     state.reset_abort();
     let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || benchmark_compression_sync(request, Some(state_inner)))
-        .await
-        .map_err(|err| format!("任务线程异常: {err}"))?
-        .map_err(|err| err.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        benchmark_compression_sync(request, Some(state_inner))
+    })
+    .await
+    .map_err(|err| format!("任务线程异常: {err}"))?
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -794,11 +862,17 @@ fn abort_task(state: State<'_, AppState>) {
 }
 
 fn log_to_file(enabled: bool, message: &str) {
-    if !enabled { return; }
+    if !enabled {
+        return;
+    }
     if let Ok(mut path) = std::env::current_exe() {
         path.pop();
         let log_file = path.join("zarc.log");
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(log_file) {
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+        {
             let _ = writeln!(f, "{}", message);
         }
     }
@@ -814,6 +888,7 @@ fn compress_archive_sync(
         bail!("源路径不存在: {}", source.display());
     }
 
+    let output_kind = OutputKind::archive_or_default(request.output_kind);
     let level = request.level.unwrap_or(8).clamp(1, 22);
     let include_root_dir = request.include_root_dir.unwrap_or(true);
     let password = normalize_password(request.password);
@@ -822,10 +897,17 @@ fn compress_archive_sync(
     let delete_source_after = request.delete_source_after.unwrap_or(false);
 
     let source_bytes = count_source_bytes(&source)?;
-    let output =
-        resolve_compress_output(&source, request.output_path.as_deref(), password.is_some())?;
+    let output = resolve_compress_output(
+        &source,
+        request.output_path.as_deref(),
+        password.is_some(),
+        output_kind,
+    )?;
 
-    log_to_file(enable_logging, &format!("开始压缩: {} -> {}", source.display(), output.display()));
+    log_to_file(
+        enable_logging,
+        &format!("开始压缩: {} -> {}", source.display(), output.display()),
+    );
 
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
@@ -834,6 +916,28 @@ fn compress_archive_sync(
 
     let reporter = ProgressReporter::new(app, "compress", source_bytes);
     reporter.begin();
+
+    if output_kind == OutputKind::SfxExe {
+        if split_size_mib.unwrap_or(0) > 0 {
+            let err = anyhow!("Windows 自解压 EXE 暂不支持分卷");
+            reporter.fail(err.to_string());
+            return Err(err);
+        }
+
+        let mut sfx_request = request;
+        sfx_request.output_kind = Some(output_kind);
+        sfx_request.password = password;
+        sfx_request.output_path = Some(path_to_string(&output));
+        return sfx::compress_sfx_archive_sync(
+            sfx_request,
+            output,
+            enable_logging,
+            delete_source_after,
+            reporter,
+            state,
+            source_bytes,
+        );
+    }
 
     let started = Instant::now();
     let operation_result = if source.is_dir() {
@@ -874,8 +978,14 @@ fn compress_archive_sync(
         .len();
 
     let hash = calculate_file_hash(&output).ok();
-    
-    log_to_file(enable_logging, &format!("压缩完成. 原始大小: {}, 压缩后: {}, 耗时: {:.2}s", source_bytes, output_bytes, duration));
+
+    log_to_file(
+        enable_logging,
+        &format!(
+            "压缩完成. 原始大小: {}, 压缩后: {}, 耗时: {:.2}s",
+            source_bytes, output_bytes, duration
+        ),
+    );
 
     if delete_source_after {
         log_to_file(enable_logging, &format!("正在删除源: {}", source.display()));
@@ -934,9 +1044,12 @@ fn decompress_archive_sync(
     let reader: Box<dyn Read> = if meta.is_multi_volume {
         Box::new(MultiVolumeReader::new(archive.clone()))
     } else {
-        Box::new(File::open(&archive).with_context(|| format!("无法打开归档文件: {}", archive.display()))?)
+        Box::new(
+            File::open(&archive)
+                .with_context(|| format!("无法打开归档文件: {}", archive.display()))?,
+        )
     };
-    
+
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
@@ -1003,7 +1116,9 @@ fn calculate_file_hash(path: &Path) -> Result<String> {
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = reader.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buf[..n]);
     }
     Ok(hasher.finalize().to_hex().to_string())
@@ -1121,22 +1236,31 @@ fn make_nonce(prefix: [u8; ENC_NONCE_PREFIX_LEN], counter: u64) -> [u8; 24] {
     nonce
 }
 
-fn create_output_sink(path: &Path, password: Option<&str>, split_size_mib: Option<u64>) -> Result<OutputSink> {
+fn create_output_sink(
+    path: &Path,
+    password: Option<&str>,
+    split_size_mib: Option<u64>,
+) -> Result<OutputSink> {
     match (password, split_size_mib) {
         (Some(pwd), Some(size)) if size > 0 => {
             let writer = MultiVolumeWriter::new(path.to_path_buf(), size);
-            Ok(OutputSink::MultiVolumeEncrypted(EncryptedWriter::new(writer, pwd)?))
+            Ok(OutputSink::MultiVolumeEncrypted(EncryptedWriter::new(
+                writer, pwd,
+            )?))
         }
-        (None, Some(size)) if size > 0 => {
-            Ok(OutputSink::MultiVolume(MultiVolumeWriter::new(path.to_path_buf(), size)))
-        }
+        (None, Some(size)) if size > 0 => Ok(OutputSink::MultiVolume(MultiVolumeWriter::new(
+            path.to_path_buf(),
+            size,
+        ))),
         (Some(pwd), _) => {
-            let file = File::create(path).with_context(|| format!("无法创建输出文件: {}", path.display()))?;
+            let file = File::create(path)
+                .with_context(|| format!("无法创建输出文件: {}", path.display()))?;
             let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
             Ok(OutputSink::Encrypted(EncryptedWriter::new(writer, pwd)?))
         }
         (None, _) => {
-            let file = File::create(path).with_context(|| format!("无法创建输出文件: {}", path.display()))?;
+            let file = File::create(path)
+                .with_context(|| format!("无法创建输出文件: {}", path.display()))?;
             let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
             Ok(OutputSink::Plain(writer))
         }
@@ -1234,15 +1358,25 @@ fn load_benchmark_sample(source: &Path, max_bytes: usize) -> Result<Vec<u8>> {
         } else {
             // Sample from beginning, middle, and end
             let chunk_size = max_bytes / 3;
-            
+
             // Beginning
             read_chunk(&mut file, 0, chunk_size, &mut sample)?;
-            
+
             // Middle
-            read_chunk(&mut file, (total_size / 2).saturating_sub(chunk_size / 2), chunk_size, &mut sample)?;
-            
+            read_chunk(
+                &mut file,
+                (total_size / 2).saturating_sub(chunk_size / 2),
+                chunk_size,
+                &mut sample,
+            )?;
+
             // End
-            read_chunk(&mut file, total_size.saturating_sub(chunk_size), chunk_size, &mut sample)?;
+            read_chunk(
+                &mut file,
+                total_size.saturating_sub(chunk_size),
+                chunk_size,
+                &mut sample,
+            )?;
         }
         return Ok(sample);
     }
@@ -1260,10 +1394,12 @@ fn load_benchmark_sample(source: &Path, max_bytes: usize) -> Result<Vec<u8>> {
         let file_path = entry.path();
         let mut file = File::open(file_path)
             .with_context(|| format!("无法读取目录样本文件: {}", file_path.display()))?;
-        
+
         let remaining = max_bytes.saturating_sub(sample.len());
-        if remaining == 0 { break; }
-        
+        if remaining == 0 {
+            break;
+        }
+
         let mut buffer = vec![0u8; remaining.min(1024 * 1024)];
         let count = file.read(&mut buffer)?;
         sample.extend_from_slice(&buffer[..count]);
@@ -1468,7 +1604,7 @@ fn append_file_with_progress<W: Write>(
 
     // We can't easily check for abort inside tar_builder.append_data without a custom reader that checks state.
     // But ProgressReader is already there! Let's update ProgressReader.
-    
+
     tar_builder
         .append_data(&mut header, archive_name, &mut progress_reader)
         .with_context(|| format!("写入文件失败: {}", source_path.display()))?;
@@ -1564,14 +1700,15 @@ fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {
         .unwrap_or_default();
 
     // Check for multi-volume suffix .001, .002 ...
-    let is_multi = name.len() > 4 && name.as_bytes()[name.len()-4] == b'.' 
-        && name.as_bytes()[name.len()-3].is_ascii_digit()
-        && name.as_bytes()[name.len()-2].is_ascii_digit()
-        && name.as_bytes()[name.len()-1].is_ascii_digit();
+    let is_multi = name.len() > 4
+        && name.as_bytes()[name.len() - 4] == b'.'
+        && name.as_bytes()[name.len() - 3].is_ascii_digit()
+        && name.as_bytes()[name.len() - 2].is_ascii_digit()
+        && name.as_bytes()[name.len() - 1].is_ascii_digit();
 
     let mut meta_name = name.clone();
     if is_multi {
-        meta_name = name[..name.len()-4].to_string();
+        meta_name = name[..name.len() - 4].to_string();
     }
 
     let encrypted = meta_name.ends_with(".enc");
@@ -1589,28 +1726,40 @@ fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {
         bail!("不支持的文件类型，仅支持 .zst/.tar.zst 及其 .enc 加密版本")
     };
 
-    Ok(ArchiveMeta { kind, encrypted, is_multi_volume: is_multi })
+    Ok(ArchiveMeta {
+        kind,
+        encrypted,
+        is_multi_volume: is_multi,
+    })
 }
 
 fn resolve_compress_output(
     source: &Path,
     output: Option<&str>,
     encrypted: bool,
+    output_kind: OutputKind,
 ) -> Result<PathBuf> {
     let mut candidate = if let Some(path) = output {
         let provided = PathBuf::from(path.trim());
         if provided.exists() && provided.is_dir() {
-            provided.join(default_compress_file_name(source, encrypted)?)
+            provided.join(default_compress_file_name(source, encrypted, output_kind)?)
         } else {
             provided
         }
     } else {
         let parent = source.parent().unwrap_or_else(|| Path::new("."));
-        parent.join(default_compress_file_name(source, encrypted)?)
+        parent.join(default_compress_file_name(source, encrypted, output_kind)?)
     };
 
-    if encrypted {
-        candidate = ensure_enc_suffix(candidate);
+    match output_kind {
+        OutputKind::Archive => {
+            if encrypted {
+                candidate = ensure_enc_suffix(candidate);
+            }
+        }
+        OutputKind::SfxExe => {
+            candidate = ensure_exe_suffix(candidate);
+        }
     }
 
     Ok(candidate)
@@ -1634,19 +1783,46 @@ fn ensure_enc_suffix(path: PathBuf) -> PathBuf {
     path.with_file_name(format!("{file_name}.enc"))
 }
 
-fn default_compress_file_name(source: &Path, encrypted: bool) -> Result<String> {
+fn ensure_exe_suffix(path: PathBuf) -> PathBuf {
+    let name_lower = path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    if name_lower.ends_with(".exe") {
+        return path;
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archive".to_string());
+
+    path.with_file_name(format!("{file_name}.exe"))
+}
+
+fn default_compress_file_name(
+    source: &Path,
+    encrypted: bool,
+    output_kind: OutputKind,
+) -> Result<String> {
     let source_name = source
         .file_name()
         .with_context(|| format!("无效路径: {}", source.display()))?
         .to_string_lossy();
 
-    let mut name = if source.is_dir() {
-        format!("{source_name}.tar.zst")
-    } else {
-        format!("{source_name}.zst")
+    let mut name = match output_kind {
+        OutputKind::Archive => {
+            if source.is_dir() {
+                format!("{source_name}.tar.zst")
+            } else {
+                format!("{source_name}.zst")
+            }
+        }
+        OutputKind::SfxExe => format!("{source_name}.sfx.exe"),
     };
 
-    if encrypted {
+    if encrypted && output_kind == OutputKind::Archive {
         name.push_str(".enc");
     }
 
@@ -1767,9 +1943,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             compress_archive,
             decompress_archive,
+            extract_embedded_archive,
             benchmark_compression,
             abort_task,
-            list_archive_content
+            list_archive_content,
+            get_embedded_archive_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

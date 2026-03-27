@@ -223,7 +223,7 @@ fn list_archive_content_sync(request: DecompressRequest) -> Result<ArchiveConten
     }
 
     let meta = detect_archive_meta(&archive)?;
-    let password = normalize_password(request.password);
+    let password = normalize_password(request.password.clone());
     if meta.encrypted && password.is_none() {
         bail!("该归档已加密，请提供解密密码以预览内容");
     }

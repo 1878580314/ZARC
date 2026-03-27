@@ -891,7 +891,7 @@ fn compress_archive_sync(
     let output_kind = OutputKind::archive_or_default(request.output_kind);
     let level = request.level.unwrap_or(8).clamp(1, 22);
     let include_root_dir = request.include_root_dir.unwrap_or(true);
-    let password = normalize_password(request.password);
+    let password = normalize_password(request.password.clone());
     let split_size_mib = request.split_size_mib;
     let enable_logging = request.enable_logging.unwrap_or(false);
     let delete_source_after = request.delete_source_after.unwrap_or(false);

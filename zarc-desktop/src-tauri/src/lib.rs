@@ -1,0 +1,2370 @@
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, Context, Result};
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::aead::rand_core::RngCore;
+use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
+use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, State};
+use walkdir::WalkDir;
+
+mod sfx;
+
+const IO_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+const MIB: f64 = 1024.0 * 1024.0;
+const PROGRESS_EVENT: &str = "zarc://progress";
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
+
+const ENC_MAGIC: &[u8; 8] = b"ZENC0001";
+const ENC_SALT_LEN: usize = 16;
+const ENC_NONCE_PREFIX_LEN: usize = 16;
+const ENC_KEY_LEN: usize = 32;
+const ENC_CHUNK_SIZE: usize = 256 * 1024;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveEntry {
+    path: String,
+    size: u64,
+    is_dir: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveContentReport {
+    entries: Vec<ArchiveEntry>,
+    total_files: usize,
+    uncompressed_size: u64,
+    hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompressRequest {
+    source_path: String,
+    output_path: Option<String>,
+    output_kind: Option<OutputKind>,
+    level: Option<i32>,
+    include_root_dir: Option<bool>,
+    password: Option<String>,
+    split_size_mib: Option<u64>,
+    enable_logging: Option<bool>,
+    delete_source_after: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum OutputKind {
+    Archive,
+    SfxExe,
+}
+
+impl OutputKind {
+    fn archive_or_default(raw: Option<Self>) -> Self {
+        raw.unwrap_or(Self::Archive)
+    }
+}
+
+struct MultiVolumeWriter {
+    base_path: PathBuf,
+    current_file: Option<BufWriter<File>>,
+    current_index: usize,
+    bytes_written_in_volume: u64,
+    volume_limit: u64,
+    total_written: u64,
+}
+
+impl MultiVolumeWriter {
+    fn new(base_path: PathBuf, volume_limit_mib: u64) -> Self {
+        Self {
+            base_path,
+            current_file: None,
+            current_index: 1,
+            bytes_written_in_volume: 0,
+            volume_limit: volume_limit_mib * 1024 * 1024,
+            total_written: 0,
+        }
+    }
+
+    fn ensure_file(&mut self) -> io::Result<&mut BufWriter<File>> {
+        if self.current_file.is_none() {
+            let path = self.volume_path(self.current_index);
+            let file = File::create(path)?;
+            self.current_file = Some(BufWriter::with_capacity(IO_BUFFER_SIZE, file));
+        }
+        Ok(self.current_file.as_mut().unwrap())
+    }
+
+    fn volume_path(&self, index: usize) -> PathBuf {
+        let ext = format!("{:03}", index);
+        let mut path = self.base_path.clone();
+        let new_name = format!("{}.{}", path.file_name().unwrap().to_string_lossy(), ext);
+        path.set_file_name(new_name);
+        path
+    }
+}
+
+impl Write for MultiVolumeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.volume_limit == 0 {
+            let writer = self.ensure_file()?;
+            let n = writer.write(buf)?;
+            self.total_written += n as u64;
+            return Ok(n);
+        }
+
+        let mut written = 0;
+        while written < buf.len() {
+            let remaining_in_vol = self
+                .volume_limit
+                .saturating_sub(self.bytes_written_in_volume);
+
+            if remaining_in_vol == 0 {
+                if let Some(mut f) = self.current_file.take() {
+                    f.flush()?;
+                }
+                self.current_index += 1;
+                self.bytes_written_in_volume = 0;
+            }
+
+            let writer = self.ensure_file()?;
+            let take = (buf.len() - written).min(remaining_in_vol.max(1) as usize);
+            let n = writer.write(&buf[written..written + take])?;
+
+            written += n;
+            self.bytes_written_in_volume += n as u64;
+            self.total_written += n as u64;
+
+            if n == 0 {
+                break;
+            }
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(ref mut f) = self.current_file {
+            f.flush()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DecompressRequest {
+    archive_path: String,
+    output_path: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddedDecompressRequest {
+    output_path: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchmarkRequest {
+    source_path: String,
+    min_level: Option<u8>,
+    max_level: Option<u8>,
+    iterations: Option<u32>,
+    sample_size_mib: Option<u32>,
+    threads: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationReport {
+    operation: String,
+    source_path: String,
+    output_path: String,
+    source_bytes: u64,
+    output_bytes: u64,
+    duration_ms: f64,
+    throughput_mi_bs: f64,
+    compression_ratio: Option<f64>,
+    blake3_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sidecar_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddedArchiveInfo {
+    host_path: String,
+    payload_bytes: u64,
+    default_extract_name: String,
+    encrypted: bool,
+    archive_kind: String,
+}
+
+#[tauri::command]
+async fn list_archive_content(
+    request: DecompressRequest,
+) -> std::result::Result<ArchiveContentReport, String> {
+    tauri::async_runtime::spawn_blocking(move || list_archive_content_sync(request))
+        .await
+        .map_err(|err| format!("任务线程异常: {err}"))?
+        .map_err(|err| err.to_string())
+}
+
+fn list_archive_content_sync(request: DecompressRequest) -> Result<ArchiveContentReport> {
+    let archive = PathBuf::from(request.archive_path.trim());
+    if !archive.exists() {
+        bail!("归档文件不存在: {}", archive.display());
+    }
+
+    let meta = detect_archive_meta(&archive)?;
+    let password = normalize_password(request.password.clone());
+    if meta.encrypted && password.is_none() {
+        bail!("该归档已加密，请提供解密密码以预览内容");
+    }
+
+    let mut hasher = blake3::Hasher::new();
+
+    // Hash the archive file itself
+    let mut hash_buf = [0u8; 64 * 1024];
+    let mut hash_reader = File::open(&archive)?;
+    loop {
+        let n = hash_reader.read(&mut hash_buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&hash_buf[..n]);
+    }
+    let archive_hash = hasher.finalize().to_hex().to_string();
+
+    let mut entries = Vec::new();
+    let mut total_size = 0u64;
+
+    let reader: Box<dyn Read> = if meta.is_multi_volume {
+        Box::new(MultiVolumeReader::new(archive.clone()))
+    } else {
+        Box::new(File::open(&archive)?)
+    };
+    let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
+
+    match (meta.encrypted, meta.kind) {
+        (true, ArchiveKind::TarZst) => {
+            let decrypt_reader =
+                EncryptedReader::new(buf_reader, password.as_deref().unwrap_or_default())?;
+            let decoder = zstd::Decoder::new(decrypt_reader)?;
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let entry = entry?;
+                let header = entry.header();
+                entries.push(ArchiveEntry {
+                    path: entry.path()?.to_string_lossy().to_string(),
+                    size: entry.size(),
+                    is_dir: header.entry_type().is_dir(),
+                });
+                total_size += entry.size();
+            }
+        }
+        (false, ArchiveKind::TarZst) => {
+            let decoder = zstd::Decoder::new(buf_reader)?;
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let entry = entry?;
+                let header = entry.header();
+                entries.push(ArchiveEntry {
+                    path: entry.path()?.to_string_lossy().to_string(),
+                    size: entry.size(),
+                    is_dir: header.entry_type().is_dir(),
+                });
+                total_size += entry.size();
+            }
+        }
+        (_, ArchiveKind::Zst) => {
+            // Single file zst doesn't store filename inside usually in this impl
+            entries.push(ArchiveEntry {
+                path: archive
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .replace(".tar", ""),
+                size: 0, // Unknown without full decompression
+                is_dir: false,
+            });
+        }
+    }
+
+    let total_files = entries.len();
+    Ok(ArchiveContentReport {
+        entries,
+        total_files,
+        uncompressed_size: total_size,
+        hash: archive_hash,
+    })
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CompressionLevelReport {
+    level: u8,
+    mean_ms: f64,
+    mean_throughput_mi_bs: f64,
+    compressed_bytes: u64,
+    ratio_percent: f64,
+    score: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchmarkReport {
+    source_path: String,
+    sample_bytes: u64,
+    min_level: u8,
+    max_level: u8,
+    iterations: u32,
+    threads: u32,
+    recommended_level: u8,
+    results: Vec<CompressionLevelReport>,
+    note: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ProgressPayload {
+    operation: String,
+    processed_bytes: u64,
+    total_bytes: u64,
+    percent: f64,
+    throughput_mi_bs: f64,
+    eta_seconds: Option<f64>,
+    done: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+struct AppState {
+    abort_requested: Arc<AtomicBool>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            abort_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn request_abort(&self) {
+        self.abort_requested.store(true, AtomicOrdering::SeqCst);
+    }
+
+    fn reset_abort(&self) {
+        self.abort_requested.store(false, AtomicOrdering::SeqCst);
+    }
+
+    fn is_aborted(&self) -> bool {
+        self.abort_requested.load(AtomicOrdering::SeqCst)
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ArchiveKind {
+    TarZst,
+    Zst,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct ArchiveMeta {
+    kind: ArchiveKind,
+    encrypted: bool,
+    is_multi_volume: bool,
+}
+
+struct ProgressState {
+    started: Instant,
+    processed: AtomicU64,
+    last_emit: Mutex<Instant>,
+}
+
+#[derive(Clone)]
+struct ProgressReporter {
+    app: Option<AppHandle>,
+    operation: &'static str,
+    total: u64,
+    state: Arc<ProgressState>,
+}
+
+impl ProgressReporter {
+    fn new(app: Option<AppHandle>, operation: &'static str, total: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            app,
+            operation,
+            total,
+            state: Arc::new(ProgressState {
+                started: now,
+                processed: AtomicU64::new(0),
+                last_emit: Mutex::new(now - PROGRESS_EMIT_INTERVAL),
+            }),
+        }
+    }
+
+    fn begin(&self) {
+        self.emit(false, None, true);
+    }
+
+    fn advance(&self, delta: u64) {
+        if delta > 0 {
+            self.state
+                .processed
+                .fetch_add(delta, AtomicOrdering::Relaxed);
+            self.emit(false, None, false);
+        }
+    }
+
+    fn finish(&self) {
+        self.state
+            .processed
+            .store(self.total, AtomicOrdering::Relaxed);
+        self.emit(true, None, true);
+    }
+
+    fn fail(&self, message: String) {
+        self.emit(true, Some(message), true);
+    }
+
+    fn emit(&self, done: bool, error: Option<String>, force: bool) {
+        if self.app.is_none() {
+            return;
+        }
+
+        {
+            let mut last_emit = self
+                .state
+                .last_emit
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if !force && !done && last_emit.elapsed() < PROGRESS_EMIT_INTERVAL {
+                return;
+            }
+            *last_emit = Instant::now();
+        }
+
+        let processed = self
+            .state
+            .processed
+            .load(AtomicOrdering::Relaxed)
+            .min(self.total);
+
+        let elapsed = self.state.started.elapsed().as_secs_f64().max(f64::EPSILON);
+        let throughput = throughput(processed, elapsed);
+        let percent = if self.total == 0 {
+            100.0
+        } else {
+            processed as f64 / self.total as f64 * 100.0
+        };
+
+        let eta_seconds = if done || throughput <= 0.0 || processed >= self.total {
+            None
+        } else {
+            let remaining_mib = (self.total.saturating_sub(processed) as f64) / MIB;
+            Some(remaining_mib / throughput)
+        };
+
+        let payload = ProgressPayload {
+            operation: self.operation.to_string(),
+            processed_bytes: processed,
+            total_bytes: self.total,
+            percent: percent.clamp(0.0, 100.0),
+            throughput_mi_bs: throughput,
+            eta_seconds,
+            done,
+            error,
+        };
+
+        if let Some(app) = &self.app {
+            let _ = app.emit(PROGRESS_EVENT, payload);
+        }
+    }
+}
+
+struct ProgressReader<R> {
+    inner: R,
+    reporter: ProgressReporter,
+}
+
+impl<R> ProgressReader<R> {
+    fn new(inner: R, reporter: ProgressReporter) -> Self {
+        Self { inner, reporter }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        if count > 0 {
+            self.reporter.advance(count as u64);
+        }
+        Ok(count)
+    }
+}
+
+struct CountingWriter<W> {
+    inner: W,
+    written: u64,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, written: 0 }
+    }
+
+    fn written(&self) -> u64 {
+        self.written
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let count = self.inner.write(buf)?;
+        self.written = self.written.saturating_add(count as u64);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+enum OutputSink {
+    Plain(BufWriter<File>),
+    Encrypted(EncryptedWriter<BufWriter<File>>),
+    MultiVolume(MultiVolumeWriter),
+    MultiVolumeEncrypted(EncryptedWriter<MultiVolumeWriter>),
+}
+
+impl OutputSink {
+    fn finalize(self) -> Result<()> {
+        match self {
+            Self::Plain(mut writer) => {
+                writer.flush().context("刷新输出文件失败")?;
+            }
+            Self::Encrypted(writer) => {
+                writer.finish().context("完成加密输出失败")?;
+            }
+            Self::MultiVolume(mut writer) => {
+                writer.flush().context("刷新分卷输出失败")?;
+            }
+            Self::MultiVolumeEncrypted(writer) => {
+                writer.finish().context("完成分卷加密输出失败")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Write for OutputSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(writer) => writer.write(buf),
+            Self::Encrypted(writer) => writer.write(buf),
+            Self::MultiVolume(writer) => writer.write(buf),
+            Self::MultiVolumeEncrypted(writer) => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush(),
+            Self::Encrypted(writer) => writer.flush(),
+            Self::MultiVolume(writer) => writer.flush(),
+            Self::MultiVolumeEncrypted(writer) => writer.flush(),
+        }
+    }
+}
+
+struct EncryptedWriter<W: Write> {
+    inner: W,
+    cipher: XChaCha20Poly1305,
+    nonce_prefix: [u8; ENC_NONCE_PREFIX_LEN],
+    counter: u64,
+    buffer: Vec<u8>,
+    finished: bool,
+}
+
+impl<W: Write> EncryptedWriter<W> {
+    fn new(mut inner: W, password: &str) -> Result<Self> {
+        let mut salt = [0_u8; ENC_SALT_LEN];
+        let mut nonce_prefix = [0_u8; ENC_NONCE_PREFIX_LEN];
+        OsRng.fill_bytes(&mut salt);
+        OsRng.fill_bytes(&mut nonce_prefix);
+
+        let key = derive_encryption_key(password, &salt)?;
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+
+        inner
+            .write_all(ENC_MAGIC)
+            .context("写入加密头失败: magic")?;
+        inner.write_all(&salt).context("写入加密头失败: salt")?;
+        inner
+            .write_all(&nonce_prefix)
+            .context("写入加密头失败: nonce prefix")?;
+
+        Ok(Self {
+            inner,
+            cipher,
+            nonce_prefix,
+            counter: 0,
+            buffer: Vec::with_capacity(ENC_CHUNK_SIZE),
+            finished: false,
+        })
+    }
+
+    fn write_encrypted_chunk(&mut self, plain: &[u8]) -> io::Result<()> {
+        let nonce = make_nonce(self.nonce_prefix, self.counter);
+        self.counter = self.counter.saturating_add(1);
+
+        let cipher_text = self
+            .cipher
+            .encrypt(XNonce::from_slice(&nonce), plain)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "加密失败"))?;
+
+        let len = cipher_text.len() as u32;
+        self.inner.write_all(&len.to_be_bytes())?;
+        self.inner.write_all(&cipher_text)?;
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+
+        if !self.buffer.is_empty() {
+            let buffer = std::mem::take(&mut self.buffer);
+            self.write_encrypted_chunk(&buffer)?;
+        }
+
+        self.inner.write_all(&0_u32.to_be_bytes())?;
+        self.inner.flush()?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for EncryptedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.finished {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "加密写入器已结束",
+            ));
+        }
+
+        self.buffer.extend_from_slice(buf);
+
+        while self.buffer.len() >= ENC_CHUNK_SIZE {
+            let chunk = self.buffer[..ENC_CHUNK_SIZE].to_vec();
+            self.write_encrypted_chunk(&chunk)?;
+            self.buffer.drain(..ENC_CHUNK_SIZE);
+        }
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct EncryptedReader<R: Read> {
+    inner: R,
+    cipher: XChaCha20Poly1305,
+    nonce_prefix: [u8; ENC_NONCE_PREFIX_LEN],
+    counter: u64,
+    decrypted: Vec<u8>,
+    pos: usize,
+    eof: bool,
+}
+
+impl<R: Read> EncryptedReader<R> {
+    fn new(mut inner: R, password: &str) -> Result<Self> {
+        let mut magic = [0_u8; ENC_MAGIC.len()];
+        inner
+            .read_exact(&mut magic)
+            .context("读取加密头失败: magic")?;
+        if &magic != ENC_MAGIC {
+            bail!("无效加密文件头，无法识别的归档格式");
+        }
+
+        let mut salt = [0_u8; ENC_SALT_LEN];
+        let mut nonce_prefix = [0_u8; ENC_NONCE_PREFIX_LEN];
+        inner
+            .read_exact(&mut salt)
+            .context("读取加密头失败: salt")?;
+        inner
+            .read_exact(&mut nonce_prefix)
+            .context("读取加密头失败: nonce prefix")?;
+
+        let key = derive_encryption_key(password, &salt)?;
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
+
+        Ok(Self {
+            inner,
+            cipher,
+            nonce_prefix,
+            counter: 0,
+            decrypted: Vec::new(),
+            pos: 0,
+            eof: false,
+        })
+    }
+
+    fn read_next_chunk(&mut self) -> io::Result<()> {
+        if self.eof {
+            return Ok(());
+        }
+
+        let mut len_buf = [0_u8; 4];
+        self.inner.read_exact(&mut len_buf)?;
+        let chunk_len = u32::from_be_bytes(len_buf) as usize;
+        if chunk_len == 0 {
+            self.eof = true;
+            self.decrypted.clear();
+            self.pos = 0;
+            return Ok(());
+        }
+
+        let mut cipher_text = vec![0_u8; chunk_len];
+        self.inner.read_exact(&mut cipher_text)?;
+
+        let nonce = make_nonce(self.nonce_prefix, self.counter);
+        self.counter = self.counter.saturating_add(1);
+
+        let plain = self
+            .cipher
+            .decrypt(XNonce::from_slice(&nonce), cipher_text.as_ref())
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "解密失败：密码错误或文件已损坏")
+            })?;
+
+        self.decrypted = plain;
+        self.pos = 0;
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for EncryptedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut written = 0_usize;
+        while written < buf.len() {
+            if self.pos >= self.decrypted.len() {
+                self.read_next_chunk()?;
+                if self.eof {
+                    break;
+                }
+            }
+
+            let available = self.decrypted.len().saturating_sub(self.pos);
+            if available == 0 {
+                break;
+            }
+
+            let take = (buf.len() - written).min(available);
+            buf[written..written + take]
+                .copy_from_slice(&self.decrypted[self.pos..self.pos + take]);
+            self.pos += take;
+            written += take;
+        }
+
+        Ok(written)
+    }
+}
+
+#[tauri::command]
+async fn compress_archive(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: CompressRequest,
+) -> std::result::Result<OperationReport, String> {
+    state.reset_abort();
+    let state_inner = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        compress_archive_sync(request, Some(app), Some(state_inner))
+    })
+    .await
+    .map_err(|err| format!("任务线程异常: {err}"))?
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn decompress_archive(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: DecompressRequest,
+) -> std::result::Result<OperationReport, String> {
+    state.reset_abort();
+    let state_inner = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        decompress_archive_sync(request, Some(app), Some(state_inner))
+    })
+    .await
+    .map_err(|err| format!("任务线程异常: {err}"))?
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_embedded_archive_info() -> std::result::Result<Option<EmbeddedArchiveInfo>, String> {
+    sfx::load_embedded_archive_info_from_current_exe().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn extract_embedded_archive(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: EmbeddedDecompressRequest,
+) -> std::result::Result<OperationReport, String> {
+    state.reset_abort();
+    let state_inner = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        sfx::extract_embedded_archive_from_current_exe(request, Some(app), Some(state_inner))
+    })
+    .await
+    .map_err(|err| format!("任务线程异常: {err}"))?
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn benchmark_compression(
+    state: State<'_, AppState>,
+    request: BenchmarkRequest,
+) -> std::result::Result<BenchmarkReport, String> {
+    state.reset_abort();
+    let state_inner = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        benchmark_compression_sync(request, Some(state_inner))
+    })
+    .await
+    .map_err(|err| format!("任务线程异常: {err}"))?
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn abort_task(state: State<'_, AppState>) {
+    state.request_abort();
+}
+
+fn log_to_file(enabled: bool, message: &str) {
+    if !enabled {
+        return;
+    }
+    if let Ok(mut path) = std::env::current_exe() {
+        path.pop();
+        let log_file = path.join("zarc.log");
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+        {
+            let _ = writeln!(f, "{}", message);
+        }
+    }
+}
+
+fn compress_archive_sync(
+    request: CompressRequest,
+    app: Option<AppHandle>,
+    state: Option<AppState>,
+) -> Result<OperationReport> {
+    let source = PathBuf::from(request.source_path.trim());
+    if !source.exists() {
+        bail!("源路径不存在: {}", source.display());
+    }
+
+    let output_kind = OutputKind::archive_or_default(request.output_kind);
+    let level = request.level.unwrap_or(8).clamp(1, 22);
+    let include_root_dir = request.include_root_dir.unwrap_or(true);
+    let password = normalize_password(request.password.clone());
+    let split_size_mib = request.split_size_mib;
+    let enable_logging = request.enable_logging.unwrap_or(false);
+    let delete_source_after = request.delete_source_after.unwrap_or(false);
+
+    let source_bytes = count_source_bytes(&source)?;
+    let output = resolve_compress_output(
+        &source,
+        request.output_path.as_deref(),
+        password.is_some(),
+        output_kind,
+    )?;
+
+    log_to_file(
+        enable_logging,
+        &format!("开始压缩: {} -> {}", source.display(), output.display()),
+    );
+
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
+    }
+
+    let reporter = ProgressReporter::new(app, "compress", source_bytes);
+    reporter.begin();
+
+    if output_kind == OutputKind::SfxExe {
+        if split_size_mib.unwrap_or(0) > 0 {
+            let err = anyhow!("Windows 自解压 EXE 暂不支持分卷");
+            reporter.fail(err.to_string());
+            return Err(err);
+        }
+
+        let mut sfx_request = request;
+        sfx_request.output_kind = Some(output_kind);
+        sfx_request.password = password;
+        sfx_request.output_path = Some(path_to_string(&output));
+        return sfx::compress_sfx_archive_sync(
+            sfx_request,
+            output,
+            enable_logging,
+            delete_source_after,
+            reporter,
+            state,
+            source_bytes,
+        );
+    }
+
+    let started = Instant::now();
+    let operation_result = if source.is_dir() {
+        compress_directory(
+            &source,
+            &output,
+            level,
+            include_root_dir,
+            password.as_deref(),
+            &reporter,
+            state.as_ref(),
+            split_size_mib,
+        )
+    } else {
+        compress_file(
+            &source,
+            &output,
+            level,
+            password.as_deref(),
+            &reporter,
+            state.as_ref(),
+            split_size_mib,
+        )
+    };
+
+    if let Err(err) = operation_result {
+        cleanup_compress_output(&output, split_size_mib);
+        reporter.fail(err.to_string());
+        log_to_file(enable_logging, &format!("压缩失败: {}", err));
+        return Err(err);
+    }
+
+    let duration = started.elapsed().as_secs_f64();
+    let (reported_output, output_bytes, hash) = compress_output_report(&output, split_size_mib)?;
+
+    log_to_file(
+        enable_logging,
+        &format!(
+            "压缩完成. 原始大小: {}, 压缩后: {}, 耗时: {:.2}s",
+            source_bytes, output_bytes, duration
+        ),
+    );
+
+    if delete_source_after {
+        log_to_file(enable_logging, &format!("正在删除源: {}", source.display()));
+        if let Err(err) = delete_source_path(&source) {
+            reporter.fail(err.to_string());
+            log_to_file(enable_logging, &format!("删除源失败: {}", err));
+            return Err(err);
+        }
+    }
+
+    reporter.finish();
+
+    Ok(OperationReport {
+        operation: "compress".to_string(),
+        source_path: path_to_string(&source),
+        output_path: path_to_string(&reported_output),
+        source_bytes,
+        output_bytes,
+        duration_ms: duration * 1000.0,
+        throughput_mi_bs: throughput(source_bytes, duration),
+        compression_ratio: Some(ratio(output_bytes, source_bytes)),
+        blake3_hash: hash,
+        sidecar_path: None,
+    })
+}
+
+fn decompress_archive_sync(
+    request: DecompressRequest,
+    app: Option<AppHandle>,
+    state: Option<AppState>,
+) -> Result<OperationReport> {
+    let archive = PathBuf::from(request.archive_path.trim());
+    if !archive.exists() {
+        bail!("归档文件不存在: {}", archive.display());
+    }
+
+    let meta = detect_archive_meta(&archive)?;
+    let password = normalize_password(request.password);
+    if meta.encrypted && password.is_none() {
+        bail!("该归档已加密，请提供解密密码");
+    }
+
+    let source_bytes = archive_input_bytes(&archive, meta)?;
+
+    let output = resolve_decompress_output(&archive, meta, request.output_path.as_deref())?;
+
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
+    }
+
+    let reporter = ProgressReporter::new(app, "decompress", source_bytes);
+    reporter.begin();
+
+    let started = Instant::now();
+
+    let reader: Box<dyn Read> = if meta.is_multi_volume {
+        Box::new(MultiVolumeReader::new(archive.clone()))
+    } else {
+        Box::new(
+            File::open(&archive)
+                .with_context(|| format!("无法打开归档文件: {}", archive.display()))?,
+        )
+    };
+
+    let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
+    let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
+
+    let output_result = match (meta.encrypted, meta.kind) {
+        (true, ArchiveKind::TarZst) => {
+            fs::create_dir_all(&output)
+                .with_context(|| format!("无法创建解压目录: {}", output.display()))?;
+            let decrypt_reader =
+                EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default())?;
+            decompress_tar_from_reader(decrypt_reader, &output, state.as_ref())?;
+            Ok(count_source_bytes(&output)?)
+        }
+        (true, ArchiveKind::Zst) => {
+            let decrypt_reader =
+                EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default())?;
+            decompress_file_from_reader(decrypt_reader, &output, state.as_ref())
+        }
+        (false, ArchiveKind::TarZst) => {
+            fs::create_dir_all(&output)
+                .with_context(|| format!("无法创建解压目录: {}", output.display()))?;
+            decompress_tar_from_reader(progress_reader, &output, state.as_ref())?;
+            Ok(count_source_bytes(&output)?)
+        }
+        (false, ArchiveKind::Zst) => {
+            decompress_file_from_reader(progress_reader, &output, state.as_ref())
+        }
+    };
+
+    let output_bytes = match output_result {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            if output.is_dir() {
+                let _ = fs::remove_dir_all(&output);
+            } else {
+                let _ = fs::remove_file(&output);
+            }
+            reporter.fail(err.to_string());
+            return Err(err);
+        }
+    };
+
+    reporter.finish();
+
+    let duration = started.elapsed().as_secs_f64();
+    let hash = calculate_file_hash(&archive).ok();
+
+    Ok(OperationReport {
+        operation: "decompress".to_string(),
+        source_path: path_to_string(&archive),
+        output_path: path_to_string(&output),
+        source_bytes,
+        output_bytes,
+        duration_ms: duration * 1000.0,
+        throughput_mi_bs: throughput(output_bytes.max(source_bytes), duration),
+        compression_ratio: None,
+        blake3_hash: hash,
+        sidecar_path: None,
+    })
+}
+
+fn calculate_file_hash(path: &Path) -> Result<String> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn benchmark_compression_sync(
+    request: BenchmarkRequest,
+    state: Option<AppState>,
+) -> Result<BenchmarkReport> {
+    let source = PathBuf::from(request.source_path.trim());
+    if !source.exists() {
+        bail!("源路径不存在: {}", source.display());
+    }
+
+    let mut min_level = request.min_level.unwrap_or(1).clamp(1, 22);
+    let mut max_level = request.max_level.unwrap_or(12).clamp(1, 22);
+    if min_level > max_level {
+        std::mem::swap(&mut min_level, &mut max_level);
+    }
+
+    let iterations = request.iterations.unwrap_or(2).clamp(1, 12);
+    let sample_size_mib = request.sample_size_mib.unwrap_or(64).clamp(4, 1024);
+    let sample_limit = sample_size_mib as usize * 1024 * 1024;
+
+    let cpu_threads = num_cpus::get().max(1) as u32;
+    let threads = request
+        .threads
+        .unwrap_or(cpu_threads)
+        .clamp(1, cpu_threads.max(1));
+
+    let sample = load_benchmark_sample(&source, sample_limit)?;
+    if sample.is_empty() {
+        bail!("基准测试样本为空，无法评估压缩等级");
+    }
+
+    let sample_bytes = sample.len() as u64;
+    let mut results = Vec::new();
+
+    for level in min_level..=max_level {
+        if let Some(s) = &state {
+            if s.is_aborted() {
+                bail!("用户已终止测试");
+            }
+        }
+
+        let mut ms_samples = Vec::with_capacity(iterations as usize);
+        let mut throughput_samples = Vec::with_capacity(iterations as usize);
+        let mut compressed_bytes = 0_u64;
+
+        for _ in 0..iterations {
+            if let Some(s) = &state {
+                if s.is_aborted() {
+                    bail!("用户已终止测试");
+                }
+            }
+
+            let start = Instant::now();
+            compressed_bytes = compress_to_count(&sample, level as i32, threads)?;
+            let elapsed = start.elapsed().as_secs_f64();
+
+            ms_samples.push(elapsed * 1000.0);
+            throughput_samples.push(throughput(sample_bytes, elapsed));
+        }
+
+        results.push(CompressionLevelReport {
+            level,
+            mean_ms: mean(&ms_samples),
+            mean_throughput_mi_bs: mean(&throughput_samples),
+            compressed_bytes,
+            ratio_percent: ratio(compressed_bytes, sample_bytes),
+            score: 0.0,
+        });
+    }
+
+    apply_score(&mut results);
+    let recommended_level = choose_recommended_level(&results)
+        .with_context(|| "无法从 benchmark 结果中推导推荐等级")?;
+
+    let note = format!(
+        "基于样本大小约 {:.2} MiB 的快速压缩测试。推荐等级平衡了压缩率与吞吐（权重：率 60%，速度 40%）。",
+        sample_bytes as f64 / MIB
+    );
+
+    Ok(BenchmarkReport {
+        source_path: path_to_string(&source),
+        sample_bytes,
+        min_level,
+        max_level,
+        iterations,
+        threads,
+        recommended_level,
+        results,
+        note,
+    })
+}
+
+fn derive_encryption_key(password: &str, salt: &[u8; ENC_SALT_LEN]) -> Result<[u8; ENC_KEY_LEN]> {
+    let mut key = [0_u8; ENC_KEY_LEN];
+
+    let params = Params::new(32 * 1024, 2, 1, Some(ENC_KEY_LEN))
+        .map_err(|err| anyhow!("创建 Argon2 参数失败: {err}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|err| anyhow!("密码派生失败: {err}"))?;
+
+    Ok(key)
+}
+
+fn make_nonce(prefix: [u8; ENC_NONCE_PREFIX_LEN], counter: u64) -> [u8; 24] {
+    let mut nonce = [0_u8; 24];
+    nonce[..ENC_NONCE_PREFIX_LEN].copy_from_slice(&prefix);
+    nonce[ENC_NONCE_PREFIX_LEN..].copy_from_slice(&counter.to_be_bytes());
+    nonce
+}
+
+fn create_output_sink(
+    path: &Path,
+    password: Option<&str>,
+    split_size_mib: Option<u64>,
+) -> Result<OutputSink> {
+    match (password, split_size_mib) {
+        (Some(pwd), Some(size)) if size > 0 => {
+            let writer = MultiVolumeWriter::new(path.to_path_buf(), size);
+            Ok(OutputSink::MultiVolumeEncrypted(EncryptedWriter::new(
+                writer, pwd,
+            )?))
+        }
+        (None, Some(size)) if size > 0 => Ok(OutputSink::MultiVolume(MultiVolumeWriter::new(
+            path.to_path_buf(),
+            size,
+        ))),
+        (Some(pwd), _) => {
+            let file = File::create(path)
+                .with_context(|| format!("无法创建输出文件: {}", path.display()))?;
+            let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
+            Ok(OutputSink::Encrypted(EncryptedWriter::new(writer, pwd)?))
+        }
+        (None, _) => {
+            let file = File::create(path)
+                .with_context(|| format!("无法创建输出文件: {}", path.display()))?;
+            let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
+            Ok(OutputSink::Plain(writer))
+        }
+    }
+}
+
+struct MultiVolumeReader {
+    base_path: PathBuf,
+    current_file: Option<BufReader<File>>,
+    current_index: usize,
+}
+
+impl MultiVolumeReader {
+    fn new(first_volume_path: PathBuf) -> Self {
+        let mut base_path = first_volume_path.clone();
+        let name = base_path.file_name().unwrap().to_string_lossy();
+        if name.ends_with(".001") {
+            let new_name = name.strip_suffix(".001").unwrap().to_string();
+            base_path.set_file_name(new_name);
+        }
+
+        Self {
+            base_path,
+            current_file: None,
+            current_index: 1,
+        }
+    }
+
+    fn open_next(&mut self) -> io::Result<bool> {
+        let ext = format!("{:03}", self.current_index);
+        let mut path = self.base_path.clone();
+        let new_name = format!("{}.{}", path.file_name().unwrap().to_string_lossy(), ext);
+        path.set_file_name(new_name);
+
+        if path.exists() {
+            let file = File::open(path)?;
+            self.current_file = Some(BufReader::with_capacity(IO_BUFFER_SIZE, file));
+            self.current_index += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+impl Read for MultiVolumeReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.current_file.is_none() {
+                if !self.open_next()? {
+                    return Ok(0);
+                }
+            }
+
+            let n = self.current_file.as_mut().unwrap().read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            } else {
+                self.current_file = None;
+            }
+        }
+    }
+}
+
+fn multi_volume_path(base_path: &Path, index: usize) -> Result<PathBuf> {
+    let file_name = base_path
+        .file_name()
+        .with_context(|| format!("分卷输出路径缺少文件名: {}", base_path.display()))?
+        .to_string_lossy();
+    let mut path = base_path.to_path_buf();
+    path.set_file_name(format!("{file_name}.{index:03}"));
+    Ok(path)
+}
+
+fn split_enabled(split_size_mib: Option<u64>) -> bool {
+    split_size_mib.unwrap_or(0) > 0
+}
+
+fn existing_volume_paths(base_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for index in 1.. {
+        let path = multi_volume_path(base_path, index)?;
+        if !path.exists() {
+            break;
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn cleanup_compress_output(base_path: &Path, split_size_mib: Option<u64>) {
+    if split_enabled(split_size_mib) {
+        if let Ok(paths) = existing_volume_paths(base_path) {
+            for path in paths {
+                let _ = fs::remove_file(path);
+            }
+        }
+    } else {
+        let _ = fs::remove_file(base_path);
+    }
+}
+
+fn compress_output_report(
+    base_path: &Path,
+    split_size_mib: Option<u64>,
+) -> Result<(PathBuf, u64, Option<String>)> {
+    if !split_enabled(split_size_mib) {
+        let output_bytes = fs::metadata(base_path)
+            .with_context(|| format!("无法读取结果文件信息: {}", base_path.display()))?
+            .len();
+        return Ok((
+            base_path.to_path_buf(),
+            output_bytes,
+            calculate_file_hash(base_path).ok(),
+        ));
+    }
+
+    let volumes = existing_volume_paths(base_path)?;
+    if volumes.is_empty() {
+        bail!(
+            "未找到分卷输出首卷: {}",
+            multi_volume_path(base_path, 1)?.display()
+        );
+    }
+
+    let mut output_bytes = 0_u64;
+    for volume in &volumes {
+        output_bytes = output_bytes.saturating_add(
+            fs::metadata(volume)
+                .with_context(|| format!("无法读取分卷文件信息: {}", volume.display()))?
+                .len(),
+        );
+    }
+
+    Ok((volumes[0].clone(), output_bytes, None))
+}
+
+fn archive_input_bytes(archive: &Path, meta: ArchiveMeta) -> Result<u64> {
+    if !meta.is_multi_volume {
+        return Ok(fs::metadata(archive)
+            .with_context(|| format!("无法读取归档信息: {}", archive.display()))?
+            .len());
+    }
+
+    let reader = MultiVolumeReader::new(archive.to_path_buf());
+    let volumes = existing_volume_paths(&reader.base_path)?;
+    if volumes.is_empty() {
+        bail!("未找到分卷归档首卷: {}", archive.display());
+    }
+
+    let mut total = 0_u64;
+    for volume in volumes {
+        total = total.saturating_add(
+            fs::metadata(&volume)
+                .with_context(|| format!("无法读取分卷归档信息: {}", volume.display()))?
+                .len(),
+        );
+    }
+    Ok(total)
+}
+
+fn delete_source_path(source: &Path) -> Result<()> {
+    if source.is_dir() {
+        fs::remove_dir_all(source).with_context(|| format!("删除源目录失败: {}", source.display()))
+    } else {
+        fs::remove_file(source).with_context(|| format!("删除源文件失败: {}", source.display()))
+    }
+}
+
+fn compress_to_count(data: &[u8], level: i32, threads: u32) -> Result<u64> {
+    let sink = CountingWriter::new(io::sink());
+    let mut encoder = zstd::Encoder::new(sink, level).context("创建 zstd 编码器失败")?;
+    encoder
+        .multithread(threads)
+        .context("无法开启 zstd 多线程压缩")?;
+
+    encoder
+        .write_all(data)
+        .context("写入压缩样本失败，无法完成快速测试")?;
+
+    let mut sink = encoder.finish().context("无法完成压缩编码")?;
+    sink.flush().context("刷新压缩输出失败")?;
+
+    Ok(sink.written())
+}
+
+fn load_benchmark_sample(source: &Path, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut sample = Vec::new();
+    if max_bytes == 0 {
+        return Ok(sample);
+    }
+
+    if source.is_file() {
+        let mut file = File::open(source)
+            .with_context(|| format!("无法读取基准测试源文件: {}", source.display()))?;
+        let total_size = file.metadata()?.len() as usize;
+
+        if total_size <= max_bytes {
+            file.read_to_end(&mut sample)?;
+        } else {
+            // Sample from beginning, middle, and end
+            let chunk_size = max_bytes / 3;
+
+            // Beginning
+            read_chunk(&mut file, 0, chunk_size, &mut sample)?;
+
+            // Middle
+            read_chunk(
+                &mut file,
+                (total_size / 2).saturating_sub(chunk_size / 2),
+                chunk_size,
+                &mut sample,
+            )?;
+
+            // End
+            read_chunk(
+                &mut file,
+                total_size.saturating_sub(chunk_size),
+                chunk_size,
+                &mut sample,
+            )?;
+        }
+        return Ok(sample);
+    }
+
+    for entry in WalkDir::new(source)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let file_path = entry.path();
+        let mut file = File::open(file_path)
+            .with_context(|| format!("无法读取目录样本文件: {}", file_path.display()))?;
+
+        let remaining = max_bytes.saturating_sub(sample.len());
+        if remaining == 0 {
+            break;
+        }
+
+        let mut buffer = vec![0u8; remaining.min(1024 * 1024)];
+        let count = file.read(&mut buffer)?;
+        sample.extend_from_slice(&buffer[..count]);
+
+        if sample.len() >= max_bytes {
+            break;
+        }
+    }
+
+    Ok(sample)
+}
+
+fn read_chunk(file: &mut File, offset: usize, size: usize, sample: &mut Vec<u8>) -> Result<()> {
+    use std::io::Seek;
+    file.seek(io::SeekFrom::Start(offset as u64))?;
+    let mut buffer = vec![0u8; size];
+    let count = file.read(&mut buffer)?;
+    sample.extend_from_slice(&buffer[..count]);
+    Ok(())
+}
+
+fn apply_score(results: &mut [CompressionLevelReport]) {
+    if results.is_empty() {
+        return;
+    }
+
+    let max_throughput = results
+        .iter()
+        .map(|item| item.mean_throughput_mi_bs)
+        .fold(0.0_f64, f64::max)
+        .max(f64::EPSILON);
+
+    let min_ratio = results
+        .iter()
+        .map(|item| item.ratio_percent)
+        .fold(f64::INFINITY, f64::min)
+        .max(f64::EPSILON);
+
+    for item in results.iter_mut() {
+        let speed_score = item.mean_throughput_mi_bs / max_throughput;
+        let ratio_score = min_ratio / item.ratio_percent.max(f64::EPSILON);
+        // Weight: 60% for compression ratio, 40% for speed
+        item.score = speed_score * 0.40 + ratio_score * 0.60;
+    }
+}
+
+fn choose_recommended_level(results: &[CompressionLevelReport]) -> Option<u8> {
+    let mut iter = results.iter();
+    let mut best = iter.next()?;
+
+    for item in iter {
+        let better_score = item.score > best.score + 1e-9;
+        let same_score = (item.score - best.score).abs() <= 1e-9;
+        let better_level = item.level < best.level;
+
+        if better_score || (same_score && better_level) {
+            best = item;
+        }
+    }
+
+    Some(best.level)
+}
+
+fn compress_file(
+    source: &Path,
+    output: &Path,
+    level: i32,
+    password: Option<&str>,
+    reporter: &ProgressReporter,
+    state: Option<&AppState>,
+    split_size_mib: Option<u64>,
+) -> Result<()> {
+    let input =
+        File::open(source).with_context(|| format!("无法打开源文件: {}", source.display()))?;
+    let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
+
+    let output_sink = create_output_sink(output, password, split_size_mib)?;
+    let mut encoder = zstd::Encoder::new(output_sink, level).context("创建 zstd 编码器失败")?;
+
+    let threads = num_cpus::get().max(1) as u32;
+    encoder
+        .multithread(threads)
+        .context("无法开启 zstd 多线程压缩")?;
+
+    let mut buf = vec![0_u8; 512 * 1024];
+    loop {
+        if let Some(s) = state {
+            if s.is_aborted() {
+                bail!("用户已终止任务");
+            }
+        }
+
+        let count = reader.read(&mut buf).context("读取压缩源文件失败")?;
+        if count == 0 {
+            break;
+        }
+
+        encoder
+            .write_all(&buf[..count])
+            .context("压缩过程中写入失败")?;
+        reporter.advance(count as u64);
+    }
+
+    let sink = encoder.finish().context("无法完成压缩输出")?;
+    sink.finalize()?;
+
+    Ok(())
+}
+
+fn compress_directory(
+    source: &Path,
+    output: &Path,
+    level: i32,
+    include_root_dir: bool,
+    password: Option<&str>,
+    reporter: &ProgressReporter,
+    state: Option<&AppState>,
+    split_size_mib: Option<u64>,
+) -> Result<()> {
+    let output_sink = create_output_sink(output, password, split_size_mib)?;
+    let mut encoder = zstd::Encoder::new(output_sink, level).context("创建 zstd 编码器失败")?;
+
+    let threads = num_cpus::get().max(1) as u32;
+    encoder
+        .multithread(threads)
+        .context("无法开启 zstd 多线程压缩")?;
+
+    let mut tar_builder = tar::Builder::new(encoder);
+    let root_name = source
+        .file_name()
+        .map(|v| v.to_owned())
+        .with_context(|| format!("目录名称无效: {}", source.display()))?;
+
+    if include_root_dir {
+        tar_builder
+            .append_dir(Path::new(&root_name), source)
+            .with_context(|| format!("写入根目录失败: {}", source.display()))?;
+    }
+
+    for entry in WalkDir::new(source)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if let Some(s) = state {
+            if s.is_aborted() {
+                bail!("用户已终止任务");
+            }
+        }
+
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(source)
+            .with_context(|| format!("无法计算相对路径: {}", path.display()))?;
+
+        let archive_name = if include_root_dir {
+            Path::new(&root_name).join(rel)
+        } else {
+            rel.to_path_buf()
+        };
+
+        if entry.file_type().is_dir() {
+            tar_builder
+                .append_dir(&archive_name, path)
+                .with_context(|| format!("写入目录失败: {}", path.display()))?;
+            continue;
+        }
+
+        if entry.file_type().is_file() {
+            append_file_with_progress(&mut tar_builder, path, &archive_name, reporter, state)?;
+        }
+    }
+
+    tar_builder.finish().context("tar 归档收尾失败")?;
+    let encoder = tar_builder.into_inner().context("无法获取压缩编码器")?;
+    let sink = encoder.finish().context("无法完成目录压缩输出")?;
+    sink.finalize()?;
+
+    Ok(())
+}
+
+fn append_file_with_progress<W: Write>(
+    tar_builder: &mut tar::Builder<W>,
+    source_path: &Path,
+    archive_name: &Path,
+    reporter: &ProgressReporter,
+    state: Option<&AppState>,
+) -> Result<()> {
+    let file = File::open(source_path)
+        .with_context(|| format!("无法读取待归档文件: {}", source_path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("无法读取文件元数据: {}", source_path.display()))?;
+
+    let mut header = tar::Header::new_gnu();
+    header.set_metadata(&metadata);
+    header.set_cksum();
+
+    let reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
+    let mut progress_reader = ProgressReader::new(reader, reporter.clone());
+
+    // We can't easily check for abort inside tar_builder.append_data without a custom reader that checks state.
+    // But ProgressReader is already there! Let's update ProgressReader.
+
+    tar_builder
+        .append_data(&mut header, archive_name, &mut progress_reader)
+        .with_context(|| format!("写入文件失败: {}", source_path.display()))?;
+
+    if let Some(s) = state {
+        if s.is_aborted() {
+            bail!("用户已终止任务");
+        }
+    }
+
+    Ok(())
+}
+
+struct AbortableReader<R: Read> {
+    inner: R,
+    state: Option<AppState>,
+}
+
+impl<R: Read> AbortableReader<R> {
+    fn new(inner: R, state: Option<&AppState>) -> Self {
+        Self {
+            inner,
+            state: state.cloned(),
+        }
+    }
+}
+
+impl<R: Read> Read for AbortableReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(s) = &self.state {
+            if s.is_aborted() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "任务已终止"));
+            }
+        }
+        self.inner.read(buf)
+    }
+}
+
+fn decompress_tar_from_reader<R: Read>(
+    reader: R,
+    output_dir: &Path,
+    state: Option<&AppState>,
+) -> Result<()> {
+    let decoder = zstd::Decoder::new(reader).context("创建 zstd 解码器失败")?;
+    let abortable = AbortableReader::new(decoder, state);
+    let mut archive = tar::Archive::new(abortable);
+    archive
+        .unpack(output_dir)
+        .with_context(|| format!("解包归档失败: {}", output_dir.display()))?;
+    Ok(())
+}
+
+fn decompress_file_from_reader<R: Read>(
+    reader: R,
+    output_file: &Path,
+    state: Option<&AppState>,
+) -> Result<u64> {
+    let mut decoder = zstd::Decoder::new(reader).context("创建 zstd 解码器失败")?;
+
+    let output = File::create(output_file)
+        .with_context(|| format!("无法创建输出文件: {}", output_file.display()))?;
+    let mut writer = BufWriter::with_capacity(IO_BUFFER_SIZE, output);
+
+    let mut output_bytes = 0_u64;
+    let mut buffer = vec![0_u8; 512 * 1024];
+    loop {
+        if let Some(s) = state {
+            if s.is_aborted() {
+                bail!("用户已终止任务");
+            }
+        }
+
+        let count = decoder.read(&mut buffer).context("解压读取失败")?;
+        if count == 0 {
+            break;
+        }
+
+        writer
+            .write_all(&buffer[..count])
+            .context("写入解压输出失败")?;
+        output_bytes = output_bytes.saturating_add(count as u64);
+    }
+
+    writer.flush().context("解压结果刷盘失败")?;
+
+    Ok(output_bytes)
+}
+
+fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {
+    let name = path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // Check for multi-volume suffix .001, .002 ...
+    let is_multi = name.len() > 4
+        && name.as_bytes()[name.len() - 4] == b'.'
+        && name.as_bytes()[name.len() - 3].is_ascii_digit()
+        && name.as_bytes()[name.len() - 2].is_ascii_digit()
+        && name.as_bytes()[name.len() - 1].is_ascii_digit();
+
+    let mut meta_name = name.clone();
+    if is_multi {
+        meta_name = name[..name.len() - 4].to_string();
+    }
+
+    let encrypted = meta_name.ends_with(".enc");
+    let base = if encrypted {
+        meta_name.strip_suffix(".enc").unwrap_or(&meta_name)
+    } else {
+        &meta_name
+    };
+
+    let kind = if base.ends_with(".tar.zst") {
+        ArchiveKind::TarZst
+    } else if base.ends_with(".zst") {
+        ArchiveKind::Zst
+    } else {
+        bail!("不支持的文件类型，仅支持 .zst/.tar.zst 及其 .enc 加密版本")
+    };
+
+    Ok(ArchiveMeta {
+        kind,
+        encrypted,
+        is_multi_volume: is_multi,
+    })
+}
+
+fn resolve_compress_output(
+    source: &Path,
+    output: Option<&str>,
+    encrypted: bool,
+    output_kind: OutputKind,
+) -> Result<PathBuf> {
+    let mut candidate = if let Some(path) = output {
+        let provided = PathBuf::from(path.trim());
+        if provided.exists() && provided.is_dir() {
+            provided.join(default_compress_file_name(source, encrypted, output_kind)?)
+        } else {
+            provided
+        }
+    } else {
+        let parent = source.parent().unwrap_or_else(|| Path::new("."));
+        parent.join(default_compress_file_name(source, encrypted, output_kind)?)
+    };
+
+    match output_kind {
+        OutputKind::Archive => {
+            if encrypted {
+                candidate = ensure_enc_suffix(candidate);
+            }
+        }
+        OutputKind::SfxExe => {
+            candidate = ensure_exe_suffix(candidate);
+        }
+    }
+
+    Ok(candidate)
+}
+
+fn ensure_enc_suffix(path: PathBuf) -> PathBuf {
+    let name_lower = path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    if name_lower.ends_with(".enc") {
+        return path;
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archive".to_string());
+
+    path.with_file_name(format!("{file_name}.enc"))
+}
+
+fn ensure_exe_suffix(path: PathBuf) -> PathBuf {
+    let name_lower = path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    if name_lower.ends_with(".exe") {
+        return path;
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archive".to_string());
+
+    path.with_file_name(format!("{file_name}.exe"))
+}
+
+fn default_compress_file_name(
+    source: &Path,
+    encrypted: bool,
+    output_kind: OutputKind,
+) -> Result<String> {
+    let source_name = source
+        .file_name()
+        .with_context(|| format!("无效路径: {}", source.display()))?
+        .to_string_lossy();
+
+    let mut name = match output_kind {
+        OutputKind::Archive => {
+            if source.is_dir() {
+                format!("{source_name}.tar.zst")
+            } else {
+                format!("{source_name}.zst")
+            }
+        }
+        OutputKind::SfxExe => format!("{source_name}.sfx.exe"),
+    };
+
+    if encrypted && output_kind == OutputKind::Archive {
+        name.push_str(".enc");
+    }
+
+    Ok(name)
+}
+
+fn resolve_decompress_output(
+    archive: &Path,
+    meta: ArchiveMeta,
+    output: Option<&str>,
+) -> Result<PathBuf> {
+    let default_name = default_decompress_name(archive, meta)?;
+
+    match output {
+        Some(path) => {
+            let candidate = PathBuf::from(path.trim());
+            match meta.kind {
+                ArchiveKind::TarZst => Ok(candidate),
+                ArchiveKind::Zst => {
+                    if candidate.exists() && candidate.is_dir() {
+                        Ok(candidate.join(default_name))
+                    } else {
+                        Ok(candidate)
+                    }
+                }
+            }
+        }
+        None => {
+            let parent = archive.parent().unwrap_or_else(|| Path::new("."));
+            Ok(parent.join(default_name))
+        }
+    }
+}
+
+fn default_decompress_name(archive: &Path, meta: ArchiveMeta) -> Result<String> {
+    let file_name = archive
+        .file_name()
+        .with_context(|| format!("无效路径: {}", archive.display()))?
+        .to_string_lossy();
+
+    let base = if meta.encrypted {
+        file_name.trim_end_matches(".enc").to_string()
+    } else {
+        file_name.to_string()
+    };
+
+    match meta.kind {
+        ArchiveKind::TarZst => {
+            let stem = base.trim_end_matches(".tar.zst");
+            Ok(format!("{stem}_extracted"))
+        }
+        ArchiveKind::Zst => {
+            let stem = base.trim_end_matches(".zst");
+            Ok(stem.to_string())
+        }
+    }
+}
+
+fn normalize_password(raw: Option<String>) -> Option<String> {
+    raw.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn count_source_bytes(path: &Path) -> Result<u64> {
+    if path.is_file() {
+        return Ok(fs::metadata(path)
+            .with_context(|| format!("无法读取文件信息: {}", path.display()))?
+            .len());
+    }
+
+    let mut total = 0_u64;
+    for entry in WalkDir::new(path)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if entry.file_type().is_file() {
+            total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
+        }
+    }
+
+    Ok(total)
+}
+
+fn throughput(bytes: u64, secs: f64) -> f64 {
+    let safe_secs = secs.max(f64::EPSILON);
+    (bytes as f64 / MIB) / safe_secs
+}
+
+fn ratio(output_bytes: u64, source_bytes: u64) -> f64 {
+    if source_bytes == 0 {
+        return 0.0;
+    }
+    output_bytes as f64 / source_bytes as f64 * 100.0
+}
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .manage(AppState::new())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            compress_archive,
+            decompress_archive,
+            extract_embedded_archive,
+            benchmark_compression,
+            abort_task,
+            list_archive_content,
+            get_embedded_archive_info
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn deterministic_bytes(size: usize) -> Vec<u8> {
+        (0..size).map(|i| ((i * 131 + 17) % 251) as u8).collect()
+    }
+
+    fn pseudo_random_bytes(size: usize) -> Vec<u8> {
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        let mut bytes = Vec::with_capacity(size);
+        for _ in 0..size {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bytes.push((state & 0xff) as u8);
+        }
+        bytes
+    }
+
+    fn write_file(path: &Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(path, bytes).expect("write file");
+    }
+
+    fn collect_file_map(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        let mut map = BTreeMap::new();
+        for entry in WalkDir::new(root)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let rel = entry
+                .path()
+                .strip_prefix(root)
+                .expect("strip prefix")
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            map.insert(rel, fs::read(entry.path()).expect("read file"));
+        }
+        map
+    }
+
+    fn assert_dirs_equal(expected: &Path, actual: &Path) {
+        assert_eq!(collect_file_map(expected), collect_file_map(actual));
+    }
+
+    fn archive_request(
+        source: &Path,
+        output: &Path,
+        level: i32,
+        include_root_dir: bool,
+        password: Option<&str>,
+        split_size_mib: Option<u64>,
+    ) -> CompressRequest {
+        CompressRequest {
+            source_path: path_to_string(source),
+            output_path: Some(path_to_string(output)),
+            output_kind: Some(OutputKind::Archive),
+            level: Some(level),
+            include_root_dir: Some(include_root_dir),
+            password: password.map(str::to_string),
+            split_size_mib,
+            enable_logging: Some(false),
+            delete_source_after: Some(false),
+        }
+    }
+
+    #[test]
+    fn encrypted_roundtrip_file_sizes_and_types() {
+        let sizes = [
+            0_usize,
+            1,
+            31,
+            4 * 1024,
+            ENC_CHUNK_SIZE - 1,
+            ENC_CHUNK_SIZE,
+            ENC_CHUNK_SIZE + 1,
+            ENC_CHUNK_SIZE * 3 + 123,
+        ];
+
+        for (idx, size) in sizes.into_iter().enumerate() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let source = temp.path().join(format!("data_{idx}.bin"));
+            let archive = temp.path().join(format!("data_{idx}.zst.enc"));
+            let output = temp.path().join(format!("out_{idx}.bin"));
+
+            let payload = deterministic_bytes(size);
+            write_file(&source, &payload);
+
+            compress_archive_sync(
+                archive_request(&source, &archive, 8, true, Some("Strong#Pass123"), None),
+                None,
+                None,
+            )
+            .expect("compress encrypted");
+
+            decompress_archive_sync(
+                DecompressRequest {
+                    archive_path: path_to_string(&archive),
+                    output_path: Some(path_to_string(&output)),
+                    password: Some("Strong#Pass123".to_string()),
+                },
+                None,
+                None,
+            )
+            .expect("decompress encrypted");
+
+            let restored = fs::read(&output).expect("read output");
+            assert_eq!(restored, payload, "size={size}");
+        }
+    }
+
+    #[test]
+    fn encrypted_roundtrip_directory_include_root_variants() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source_dir = temp.path().join("project_src");
+        fs::create_dir_all(&source_dir).expect("create source dir");
+
+        write_file(&source_dir.join("empty.txt"), b"");
+        write_file(&source_dir.join("plain.txt"), b"hello encrypted world");
+        write_file(&source_dir.join("config.json"), br#"{"k":1,"v":"x"}"#);
+        write_file(
+            &source_dir.join("nested/bin.dat"),
+            &deterministic_bytes(131_072),
+        );
+        write_file(
+            &source_dir.join("nested/unicode/中文-emoji.txt"),
+            "你好, encryption ✓".as_bytes(),
+        );
+        write_file(
+            &source_dir.join("nested/huge/chunk.bin"),
+            &deterministic_bytes(ENC_CHUNK_SIZE * 2 + 77),
+        );
+
+        for include_root in [true, false] {
+            let archive = temp.path().join(format!("dir_{include_root}.tar.zst.enc"));
+            let out_dir = temp.path().join(format!("out_{include_root}"));
+
+            compress_archive_sync(
+                archive_request(
+                    &source_dir,
+                    &archive,
+                    6,
+                    include_root,
+                    Some("Dir#Secure987"),
+                    None,
+                ),
+                None,
+                None,
+            )
+            .expect("compress dir encrypted");
+
+            decompress_archive_sync(
+                DecompressRequest {
+                    archive_path: path_to_string(&archive),
+                    output_path: Some(path_to_string(&out_dir)),
+                    password: Some("Dir#Secure987".to_string()),
+                },
+                None,
+                None,
+            )
+            .expect("decompress dir encrypted");
+
+            let actual_root = if include_root {
+                out_dir.join("project_src")
+            } else {
+                out_dir.clone()
+            };
+            assert_dirs_equal(&source_dir, &actual_root);
+        }
+    }
+
+    #[test]
+    fn encrypted_archive_rejects_wrong_password() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("secret.bin");
+        let archive = temp.path().join("secret.zst.enc");
+        let output = temp.path().join("secret.out");
+
+        write_file(&source, &deterministic_bytes(8192));
+
+        compress_archive_sync(
+            archive_request(&source, &archive, 5, true, Some("CorrectPassword"), None),
+            None,
+            None,
+        )
+        .expect("compress encrypted");
+
+        let err = decompress_archive_sync(
+            DecompressRequest {
+                archive_path: path_to_string(&archive),
+                output_path: Some(path_to_string(&output)),
+                password: Some("WrongPassword".to_string()),
+            },
+            None,
+            None,
+        )
+        .expect_err("wrong password must fail");
+
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn plain_roundtrip_still_works_after_encryption_feature() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("plain.bin");
+        let archive = temp.path().join("plain.bin.zst");
+        let output = temp.path().join("plain.out");
+
+        let payload = deterministic_bytes(2 * 1024 * 1024 + 13);
+        write_file(&source, &payload);
+
+        compress_archive_sync(
+            archive_request(&source, &archive, 9, true, None, None),
+            None,
+            None,
+        )
+        .expect("compress plain");
+
+        decompress_archive_sync(
+            DecompressRequest {
+                archive_path: path_to_string(&archive),
+                output_path: Some(path_to_string(&output)),
+                password: None,
+            },
+            None,
+            None,
+        )
+        .expect("decompress plain");
+
+        assert_eq!(fs::read(output).expect("read output"), payload);
+    }
+
+    #[test]
+    fn split_archive_reports_first_volume_and_roundtrips() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("split.bin");
+        let archive = temp.path().join("split.bin.zst");
+        let output = temp.path().join("split.out");
+
+        let payload = pseudo_random_bytes(3 * 1024 * 1024 + 113);
+        write_file(&source, &payload);
+
+        let report = compress_archive_sync(
+            archive_request(&source, &archive, 1, true, None, Some(1)),
+            None,
+            None,
+        )
+        .expect("compress split archive");
+
+        let first_volume = temp.path().join("split.bin.zst.001");
+        let second_volume = temp.path().join("split.bin.zst.002");
+        assert_eq!(report.output_path, path_to_string(&first_volume));
+        assert!(first_volume.exists());
+        assert!(second_volume.exists());
+        assert_eq!(report.blake3_hash, None);
+
+        let volumes = existing_volume_paths(&archive).expect("list split volumes");
+        assert!(volumes.len() > 1);
+        let expected_size: u64 = volumes
+            .iter()
+            .map(|path| fs::metadata(path).unwrap().len())
+            .sum();
+        assert_eq!(report.output_bytes, expected_size);
+
+        decompress_archive_sync(
+            DecompressRequest {
+                archive_path: path_to_string(&first_volume),
+                output_path: Some(path_to_string(&output)),
+                password: None,
+            },
+            None,
+            None,
+        )
+        .expect("decompress split archive");
+
+        assert_eq!(fs::read(output).expect("read output"), payload);
+    }
+
+    #[test]
+    fn benchmark_compression_returns_recommendation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source_path = temp.path().join("blob.bin");
+        write_file(&source_path, &deterministic_bytes(2 * 1024 * 1024));
+
+        let report = benchmark_compression_sync(
+            BenchmarkRequest {
+                source_path: path_to_string(&source_path),
+                min_level: Some(1),
+                max_level: Some(4),
+                iterations: Some(1),
+                sample_size_mib: Some(16),
+                threads: Some(1),
+            },
+            None,
+        )
+        .expect("benchmark");
+
+        assert_eq!(report.results.len(), 4);
+        assert!((1..=4).contains(&report.recommended_level));
+        assert!(report.sample_bytes > 0);
+    }
+}

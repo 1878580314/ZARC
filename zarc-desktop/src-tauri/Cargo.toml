@@ -1,0 +1,37 @@
+[package]
+name = "zarc-desktop"
+version = "0.1.0"
+description = "High-performance zstd desktop utility"
+authors = ["timerain"]
+license = "MIT"
+edition = "2021"
+
+[lib]
+name = "zarc_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+num_cpus = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tempfile = "3"
+walkdir = "2"
+zstd = { version = "0.13", features = ["zstdmt"] }
+blake3 = "1"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = true
+incremental = false

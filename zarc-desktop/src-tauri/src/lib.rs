@@ -905,6 +905,7 @@ fn compress_archive_sync(
         password.is_some(),
         output_kind,
     )?;
+    validate_compress_paths(&source, &output, output_kind, split_size_mib)?;
 
     log_to_file(
         enable_logging,
@@ -1027,11 +1028,11 @@ fn decompress_archive_sync(
     let source_bytes = archive_input_bytes(&archive, meta)?;
 
     let output = resolve_decompress_output(&archive, meta, request.output_path.as_deref())?;
+    validate_decompress_paths(&archive, &output, meta)?;
 
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
-    }
+    let parent = output_parent(&output);
+    fs::create_dir_all(parent)
+        .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
 
     let reporter = ProgressReporter::new(app, "decompress", source_bytes);
     reporter.begin();
@@ -1050,39 +1051,17 @@ fn decompress_archive_sync(
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
-    let output_result = match (meta.encrypted, meta.kind) {
-        (true, ArchiveKind::TarZst) => {
-            fs::create_dir_all(&output)
-                .with_context(|| format!("无法创建解压目录: {}", output.display()))?;
-            let decrypt_reader =
-                EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default())?;
-            decompress_tar_from_reader(decrypt_reader, &output, state.as_ref())?;
-            Ok(count_source_bytes(&output)?)
-        }
-        (true, ArchiveKind::Zst) => {
-            let decrypt_reader =
-                EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default())?;
-            decompress_file_from_reader(decrypt_reader, &output, state.as_ref())
-        }
-        (false, ArchiveKind::TarZst) => {
-            fs::create_dir_all(&output)
-                .with_context(|| format!("无法创建解压目录: {}", output.display()))?;
-            decompress_tar_from_reader(progress_reader, &output, state.as_ref())?;
-            Ok(count_source_bytes(&output)?)
-        }
-        (false, ArchiveKind::Zst) => {
-            decompress_file_from_reader(progress_reader, &output, state.as_ref())
-        }
+    let output_result = if meta.encrypted {
+        let decrypt_reader =
+            EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default())?;
+        decompress_reader_transactionally(decrypt_reader, meta.kind, &output, state.as_ref())
+    } else {
+        decompress_reader_transactionally(progress_reader, meta.kind, &output, state.as_ref())
     };
 
     let output_bytes = match output_result {
         Ok(bytes) => bytes,
         Err(err) => {
-            if output.is_dir() {
-                let _ = fs::remove_dir_all(&output);
-            } else {
-                let _ = fs::remove_file(&output);
-            }
             reporter.fail(err.to_string());
             return Err(err);
         }
@@ -1794,6 +1773,112 @@ fn decompress_file_from_reader<R: Read>(
     writer.flush().context("解压结果刷盘失败")?;
 
     Ok(output_bytes)
+}
+
+fn decompress_reader_transactionally<R: Read>(
+    reader: R,
+    kind: ArchiveKind,
+    output: &Path,
+    state: Option<&AppState>,
+) -> Result<u64> {
+    let parent = output_parent(output);
+    let temp_name = format!(".zarc-tmp-{}", std::process::id());
+    let temp_path = parent.join(temp_name);
+
+    if temp_path.exists() {
+        if temp_path.is_dir() {
+            fs::remove_dir_all(&temp_path).context("清理旧临时目录失败")?;
+        } else {
+            fs::remove_file(&temp_path).context("清理旧临时文件失败")?;
+        }
+    }
+
+    let result = match kind {
+        ArchiveKind::TarZst => {
+            fs::create_dir_all(&temp_path)
+                .with_context(|| format!("创建临时解压目录失败: {}", temp_path.display()))?;
+            decompress_tar_from_reader(reader, &temp_path, state)?;
+            count_source_bytes_strict(&temp_path)
+        }
+        ArchiveKind::Zst => {
+            decompress_file_from_reader(reader, &temp_path, state)
+        }
+    };
+
+    let bytes = match result {
+        Ok(value) => value,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&temp_path);
+            let _ = fs::remove_file(&temp_path);
+            return Err(err);
+        }
+    };
+
+    if output.exists() {
+        bail!("输出路径已存在，为保护数据拒绝覆盖: {}", output.display());
+    }
+
+    fs::rename(&temp_path, output).with_context(|| {
+        format!(
+            "提交解压结果失败: {} -> {}",
+            temp_path.display(),
+            output.display()
+        )
+    })?;
+
+    Ok(bytes)
+}
+
+fn output_parent(path: &Path) -> &Path {
+    path.parent().unwrap_or_else(|| Path::new("."))
+}
+
+fn validate_compress_paths(
+    source: &Path,
+    output: &Path,
+    _kind: OutputKind,
+    _split_size: Option<u64>,
+) -> Result<()> {
+    let source = fs::canonicalize(source)
+        .with_context(|| format!("无法解析源路径: {}", source.display()))?;
+    let output_parent = output_parent(output);
+    let output_parent = fs::canonicalize(output_parent).unwrap_or_else(|_| output_parent.to_path_buf());
+    let output_abs = output_parent.join(
+        output.file_name().unwrap_or_else(|| std::ffi::OsStr::new("archive")),
+    );
+
+    if output_abs == source {
+        bail!("输出路径不能覆盖源路径");
+    }
+    if source.is_dir() && output_abs.starts_with(&source) {
+        bail!("输出路径不能位于待压缩目录内部");
+    }
+    Ok(())
+}
+
+fn validate_decompress_paths(archive: &Path, output: &Path, _meta: ArchiveMeta) -> Result<()> {
+    if archive == output {
+        bail!("解压输出不能覆盖归档文件");
+    }
+    if output.exists() {
+        bail!("输出路径已存在，为保护数据拒绝覆盖: {}", output.display());
+    }
+    Ok(())
+}
+
+fn count_source_bytes_strict(path: &Path) -> Result<u64> {
+    if path.is_file() {
+        return Ok(fs::metadata(path)?.len());
+    }
+
+    let mut total = 0_u64;
+    for entry in WalkDir::new(path) {
+        let entry = entry.context("遍历目录失败")?;
+        if entry.file_type().is_file() {
+            total = total.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(total)
 }
 
 fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {

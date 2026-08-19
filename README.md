@@ -4,7 +4,7 @@
 
 ZARC Studio 是一个基于 **Rust + Tauri + Svelte** 的跨平台高性能压缩工具。
 
-### 最新更新
+### v0.1.1 最新更新
 
 - 加强 Windows 文件系统兼容性，支持目录中的 `NUL` 等保留设备名与 verbatim 路径。
 - 升级加密归档格式，记录 Argon2id 参数并增加恶意参数/分块长度校验，同时兼容旧版加密归档。
@@ -71,7 +71,7 @@ npm run tauri dev
 
 ZARC Studio is a cross-platform high-performance compression application built with **Rust + Tauri + Svelte**.
 
-### Latest Update
+### v0.1.1 Latest Update
 
 - Improved Windows filesystem compatibility, including verbatim paths and reserved names such as `NUL` inside source trees.
 - Upgraded the encrypted archive format to store Argon2id parameters and validate hostile KDF/chunk values while retaining legacy compatibility.

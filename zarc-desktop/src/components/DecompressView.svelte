@@ -2,73 +2,107 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { app } from '../stores/app.svelte';
   import { task } from '../stores/task.svelte';
-  import { api } from '../lib/api';
-  import type { ArchiveContentReport } from '../lib/api';
-  import { formatOperation, emptyToNull } from '../lib/format';
+  import { progress } from '../stores/progress.svelte';
+  import { toasts } from '../stores/toast.svelte';
+  import { registerPrimaryAction } from '../lib/shortcuts';
+  import { api, type ArchiveContentReport, type OperationReport } from '../lib/api';
+  import { emptyToNull, formatBytes, pathBaseName } from '../lib/format';
   import Card from './ui/Card.svelte';
   import Button from './ui/Button.svelte';
-  import FileInput from './ui/FileInput.svelte';
-  import TextInput from './ui/TextInput.svelte';
+  import Field from './ui/Field.svelte';
+  import PathInput from './ui/PathInput.svelte';
+  import PasswordInput from './ui/PasswordInput.svelte';
+  import Tag from './ui/Tag.svelte';
   import SfxBanner from './SfxBanner.svelte';
   import ArchiveBrowser from './ArchiveBrowser.svelte';
+  import ResultCard from './ResultCard.svelte';
+  import ProgressBar from './ProgressBar.svelte';
 
   let password = $state('');
   let output = $state('');
-  let result = $state('');
+  let report = $state<OperationReport | null>(null);
   let browserReport = $state<ArchiveContentReport | null>(null);
+  let touched = $state(false);
+  /** 预览与解压共用 decompress 槽位，用它区分「读列表」和「真解压」。 */
+  let previewing = $state(false);
 
   let isSfx = $derived(app.isSfx);
-  let source = $derived(isSfx ? app.sfxInfo?.hostPath ?? '' : app.decompressSource);
+  let source = $derived(isSfx ? (app.sfxInfo?.hostPath ?? '') : app.decompressSource);
   let busy = $derived(task.busy);
-  let isAbort = $derived(task.activeKind === 'decompress' && task.aborting);
-  let outputPlaceholder = $derived(
-    isSfx && app.sfxInfo
-      ? `请选择输出目录，将生成 ${app.sfxInfo.defaultExtractName}`
-      : '选择解压输出目录'
+  let running = $derived(task.activeKind === 'decompress');
+
+  let sourceError = $derived(touched && !source ? '请先选择要解压的归档文件。' : undefined);
+  let outputError = $derived(
+    touched && isSfx && !output.trim() ? '自解压模式必须指定输出目录。' : undefined
   );
 
-  async function pickSource() {
+  let outputPlaceholder = $derived(
+    isSfx && app.sfxInfo
+      ? `选择输出目录，将生成 ${app.sfxInfo.defaultExtractName}`
+      : '留空则解压到归档所在目录'
+  );
+
+  $effect(() => registerPrimaryAction('decompress', submit));
+
+  async function pickSource(): Promise<void> {
     const selected = await open({
       title: '选择归档文件',
       multiple: false,
       directory: false,
-      filters: [{ name: 'Archive', extensions: ['zst', 'enc'] }]
+      filters: [
+        { name: 'ZARC 归档', extensions: ['zst', 'enc', 'exe'] },
+        { name: '全部文件', extensions: ['*'] }
+      ]
     });
-    if (typeof selected === 'string') app.setDecompressSource(selected);
+    if (typeof selected === 'string') {
+      app.setDecompressSource(selected);
+      browserReport = null;
+    }
   }
 
-  async function pickOutput() {
+  async function pickOutput(): Promise<void> {
     const selected = await open({ title: '选择解压输出目录', multiple: false, directory: true });
     if (typeof selected === 'string') output = selected;
   }
 
-  async function preview() {
+  async function preview(): Promise<void> {
+    touched = true;
     if (!source) {
       app.setStatus('请先选择归档文件。', 'error');
       return;
     }
-    await task.run('decompress', '正在读取归档列表...', async () => {
-      const report = await api.listContent({
-        archivePath: source,
-        password: emptyToNull(password)
+    previewing = true;
+    try {
+      const ok = await task.run('decompress', '正在读取归档列表...', async () => {
+        const listed = await api.listContent({
+          archivePath: source,
+          password: emptyToNull(password)
+        });
+        browserReport = listed;
+        app.setStatus(`已列出 ${listed.totalFiles} 个条目。`, 'success');
       });
-      browserReport = report;
-      app.setStatus('归档预览已加载。', 'success');
-    });
+      // 预览只读元数据，没必要在任务中心留下一张 100% 的解压卡片。
+      if (ok) progress.hide('decompress');
+    } finally {
+      previewing = false;
+    }
   }
 
-  async function submit() {
+  async function submit(): Promise<void> {
+    touched = true;
     if (!isSfx && !source) {
       app.setStatus('请先选择归档文件。', 'error');
+      toasts.warn('还没有选择归档', '点击「选择」，也可以直接把归档拖进窗口。');
       return;
     }
     if (isSfx && !output.trim()) {
       app.setStatus('请选择解压输出目录。', 'error');
+      toasts.warn('还没有选择输出目录', '自解压包不知道该把文件放到哪里。');
       return;
     }
 
-    await task.run('decompress', '正在解压，请稍候...', async () => {
-      const report = isSfx
+    const ok = await task.run('decompress', `正在解压 ${pathBaseName(source)}...`, async () => {
+      report = isSfx
         ? await api.extractEmbedded({
             outputPath: emptyToNull(output),
             password: emptyToNull(password)
@@ -78,68 +112,119 @@
             outputPath: emptyToNull(output),
             password: emptyToNull(password)
           });
-      result = formatOperation(report);
       app.setStatus(`解压完成: ${report.outputPath}`, 'success');
     });
-  }
 
-  function abort() {
-    task.requestAbort();
+    if (ok && report) {
+      toasts.success('解压完成', report.outputPath);
+    }
   }
 </script>
 
-<div class="flex flex-col gap-5 animate-[var(--animate-fade-in-scale)]">
-  {#if isSfx}
-    <SfxBanner />
-  {/if}
+<div class="flex flex-col gap-4 animate-[var(--animate-rise)]">
+  <SfxBanner />
 
-  <Card>
-    <div class="mb-5 flex items-center justify-between">
-      <h3 class="text-base font-bold text-primary">解压配置</h3>
-    </div>
+  <Card
+    title="解压设置"
+    subtitle={isSfx ? '归档已内嵌，只需决定放到哪里' : '选择归档并指定输出位置'}
+    icon="decompress"
+  >
+    {#snippet actions()}
+      {#if app.sfxInfo?.encrypted || (!isSfx && source.toLowerCase().endsWith('.enc'))}
+        <Tag tone="warning" icon="shield">需要密码</Tag>
+      {/if}
+    {/snippet}
 
     <div class="flex flex-col gap-4">
-      <div class="flex flex-col gap-2">
-        <span class="text-xs font-medium text-secondary">归档源</span>
-        <div class="flex gap-2">
-          <FileInput value={source} placeholder="选择归档文件" disabled={isSfx} class="flex-1" />
-          <Button variant="ghost" onclick={pickSource} disabled={isSfx}>选择</Button>
-          <Button variant="ghost" onclick={preview} disabled={isSfx}>预览</Button>
-        </div>
-      </div>
+      <Field
+        label="归档源"
+        error={sourceError}
+        hint={isSfx ? '自解压模式下由程序自身提供，不可更改。' : undefined}
+      >
+        {#snippet aside()}
+          {#if isSfx && app.sfxInfo}
+            {formatBytes(app.sfxInfo.payloadBytes)}
+          {/if}
+        {/snippet}
+        <PathInput
+          value={source}
+          onCommit={(next) => !isSfx && app.setDecompressSource(next)}
+          icon="archive"
+          readonly={isSfx}
+          invalid={Boolean(sourceError)}
+          placeholder="选择 .zst / .enc / .001 归档"
+        >
+          {#snippet actions()}
+            <Button variant="ghost" size="sm" icon="folder" onclick={pickSource} disabled={isSfx}>
+              选择
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon="search"
+              onclick={preview}
+              loading={previewing}
+              disabled={isSfx || (busy && !previewing)}
+            >
+              预览
+            </Button>
+          {/snippet}
+        </PathInput>
+      </Field>
 
-      <div class="flex flex-col gap-2">
-        <span class="text-xs font-medium text-secondary">输出目录</span>
-        <div class="flex gap-2">
-          <FileInput bind:value={output} placeholder={outputPlaceholder} class="flex-1" />
-          <Button variant="ghost" onclick={pickOutput}>选择</Button>
-        </div>
-      </div>
+      <Field label="输出目录" error={outputError}>
+        <PathInput
+          bind:value={output}
+          icon="folder"
+          invalid={Boolean(outputError)}
+          placeholder={outputPlaceholder}
+        >
+          {#snippet actions()}
+            <Button variant="ghost" size="sm" icon="folder" onclick={pickOutput}>选择</Button>
+          {/snippet}
+        </PathInput>
+      </Field>
 
-      <div class="flex flex-col gap-2">
-        <span class="text-xs font-medium text-secondary">密码（可选）</span>
-        <TextInput bind:value={password} type="password" placeholder="加密归档请输入密码" />
-      </div>
+      <Field label="密码" hint="非加密归档留空即可。">
+        <PasswordInput bind:value={password} placeholder="加密归档请输入密码" />
+      </Field>
 
-      <div class="flex gap-3 pt-2">
-        <Button onclick={submit} disabled={busy}>开始解压</Button>
-        {#if task.activeKind === 'decompress'}
-          <Button variant="danger" onclick={abort} disabled={isAbort}>
-            {isAbort ? '正在停止...' : '停止'}
+      <div class="flex items-center gap-3 border-t border-line pt-4">
+        <Button
+          icon="play"
+          loading={running && !previewing}
+          disabled={busy && !running}
+          onclick={submit}
+        >
+          开始解压
+        </Button>
+        {#if running && !previewing}
+          <Button
+            variant="danger"
+            icon="stop"
+            disabled={task.aborting}
+            onclick={() => task.requestAbort()}
+          >
+            {task.aborting ? '正在停止' : '停止'}
           </Button>
         {/if}
+        <span class="ml-auto text-[0.7rem] text-fg-faint">Ctrl + Enter</span>
       </div>
     </div>
   </Card>
+
+  <!-- 自解压模式没有侧栏任务中心，进度只能在这里就地显示。 -->
+  {#if isSfx && progress.decompress.visible}
+    <div class="panel rounded-panel px-5 py-4">
+      <ProgressBar progress={progress.decompress} label="正在解压..." />
+    </div>
+  {/if}
 
   {#if browserReport}
     <ArchiveBrowser report={browserReport} onClose={() => (browserReport = null)} />
   {/if}
 
-  {#if result}
-    <Card>
-      <h3 class="mb-3 text-base font-bold text-primary">解压结果</h3>
-      <pre class="overflow-x-auto whitespace-pre-wrap rounded-2xl bg-[var(--surface-hover)] p-4 text-xs leading-relaxed text-secondary">{result}</pre>
-    </Card>
+  {#if report}
+    <ResultCard title="解压完成" {report} onDismiss={() => (report = null)} />
   {/if}
 </div>

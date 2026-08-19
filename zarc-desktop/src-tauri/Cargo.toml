@@ -10,6 +10,10 @@ edition = "2021"
 name = "zarc_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "ZARC"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -21,12 +25,13 @@ num_cpus = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tar = "0.4"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["custom-protocol"] }
 tauri-plugin-dialog = "2"
 tempfile = "3"
 walkdir = "2"
 zstd = { version = "0.13", features = ["zstdmt"] }
 blake3 = "1"
+zeroize = "1"
 
 [profile.release]
 codegen-units = 1

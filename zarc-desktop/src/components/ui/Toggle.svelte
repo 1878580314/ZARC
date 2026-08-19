@@ -1,41 +1,65 @@
 <script lang="ts">
+  import Icon, { type IconName } from './Icon.svelte';
+
   interface Props {
     checked: boolean;
     label: string;
     description?: string;
+    icon?: IconName;
+    disabled?: boolean;
+    /** 打开会带来风险时置为 true（例如「完成后删除源」）。 */
+    danger?: boolean;
     onChange?: (checked: boolean) => void;
   }
 
-  let { checked = $bindable(), label, description, onChange }: Props = $props();
+  let {
+    checked = $bindable(),
+    label,
+    description,
+    icon,
+    disabled = false,
+    danger = false,
+    onChange
+  }: Props = $props();
 
-  function toggle() {
+  function toggle(): void {
+    if (disabled) return;
     checked = !checked;
     onChange?.(checked);
   }
+
+  let onColor = $derived(danger ? 'bg-danger' : 'bg-accent');
 </script>
 
 <button
   type="button"
   role="switch"
   aria-checked={checked}
+  {disabled}
   onclick={toggle}
-  class="group flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors hover:bg-[var(--surface-hover)]"
+  class="flex w-full items-start gap-3 rounded-control px-3 py-2.5 text-left transition-colors hover:bg-inset disabled:pointer-events-none disabled:opacity-45"
 >
   <span
-    class="relative h-6 w-11 shrink-0 rounded-full transition-colors duration-300 {checked
-      ? 'bg-accent'
-      : 'bg-[var(--border-soft)]'}"
+    class="relative mt-0.5 h-[1.35rem] w-10 shrink-0 rounded-full transition-colors duration-300 {checked
+      ? onColor
+      : 'bg-inset-strong'}"
   >
     <span
-      class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-md transition-transform duration-300 {checked
-        ? 'translate-x-5'
+      class="absolute top-[0.175rem] left-[0.175rem] h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-300 {checked
+        ? 'translate-x-[1.15rem]'
         : ''}"
     ></span>
   </span>
-  <span class="flex flex-col">
-    <span class="text-sm font-medium text-primary">{label}</span>
+
+  <span class="flex min-w-0 flex-col gap-0.5">
+    <span class="flex items-center gap-1.5 text-sm leading-tight font-medium text-fg">
+      {#if icon}
+        <Icon name={icon} size={14} class={checked && danger ? 'text-danger' : 'text-fg-faint'} />
+      {/if}
+      {label}
+    </span>
     {#if description}
-      <span class="text-xs text-muted">{description}</span>
+      <span class="text-xs leading-snug text-fg-faint">{description}</span>
     {/if}
   </span>
 </button>

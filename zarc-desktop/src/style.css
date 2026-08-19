@@ -9,145 +9,358 @@
 @import "@fontsource/noto-sans-sc/500.css";
 @import "@fontsource/noto-sans-sc/700.css";
 
-/* Dark variant follows the data-theme attribute set by the anti-flicker script. */
+/* 深色变体跟随 index.html 的防闪烁脚本写入的 data-theme。 */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-@theme {
-  --font-sans: "Manrope", "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
-
-  /* Accent — teal/cyan */
-  --color-accent: oklch(0.72 0.13 178);
-  --color-accent-strong: oklch(0.65 0.15 175);
-  --color-accent-soft: oklch(0.82 0.10 178);
-  --color-warning: oklch(0.78 0.15 70);
-  --color-danger: oklch(0.64 0.21 25);
-  --color-success: oklch(0.70 0.15 155);
-
-  /* Radii */
-  --radius-card: 1.5rem;
-  --radius-pill: 9999px;
-
-  /* Glass glow shadow */
-  --shadow-glow: 0 18px 40px -12px oklch(0.72 0.13 178 / 0.28);
-  --shadow-soft: 0 8px 24px -8px oklch(0.2 0.02 240 / 0.18);
-
-  /* Animations */
-  --animate-fade-in: fade-in 0.32s cubic-bezier(0.16, 1, 0.3, 1);
-  --animate-fade-in-scale: fade-in-scale 0.34s cubic-bezier(0.16, 1, 0.3, 1);
-  --animate-bounce-soft: bounce-soft 1.8s ease-in-out infinite;
-  --animate-pulse-glow: pulse-glow 1.6s ease-in-out infinite;
-  --animate-spin-slow: spin 1.1s linear infinite;
-  --animate-shimmer: shimmer 1.8s linear infinite;
-
-  @keyframes fade-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-  @keyframes fade-in-scale {
-    from { opacity: 0; transform: scale(0.965) translateY(10px); }
-    to { opacity: 1; transform: none; }
-  }
-  @keyframes bounce-soft {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-12px); }
-  }
-  @keyframes pulse-glow {
-    0%, 100% { filter: drop-shadow(0 0 3px var(--color-accent)); }
-    50% { filter: drop-shadow(0 0 9px var(--color-accent)); }
-  }
-  @keyframes shimmer {
-    0% { background-position: -200% 0; }
-    100% { background-position: 200% 0; }
-  }
-}
-
-/* Theme tokens: light is the default surface; dark overrides via [data-theme=dark]. */
+/* ───────────────────────────────────────────────────────────────
+   运行时调色板。:root 为浅色，[data-theme="dark"] 覆盖。
+   这些是「原始变量」，下面的 @theme inline 把它们暴露成工具类。
+   ─────────────────────────────────────────────────────────────── */
 :root {
-  --bg-base: oklch(0.98 0.005 240);
-  --bg-grad-1: oklch(0.90 0.04 178);
-  --bg-grad-2: oklch(0.92 0.05 280);
-  --surface: oklch(1 0 0 / 0.66);
-  --surface-solid: oklch(0.99 0.004 240);
-  --surface-hover: oklch(0.97 0.006 240);
-  --border-soft: oklch(0.5 0.02 240 / 0.14);
-  --text-primary: oklch(0.22 0.02 250);
-  --text-secondary: oklch(0.48 0.02 250);
-  --text-muted: oklch(0.58 0.02 250);
-  --border-input: oklch(0.5 0.02 240 / 0.22);
+  color-scheme: light;
+
+  --zarc-canvas: oklch(0.975 0.006 250);
+  --zarc-aurora-1: oklch(0.88 0.075 190 / 0.75);
+  --zarc-aurora-2: oklch(0.89 0.080 290 / 0.62);
+  --zarc-aurora-3: oklch(0.92 0.060 60 / 0.45);
+
+  --zarc-panel: oklch(1 0 0 / 0.72);
+  --zarc-panel-solid: oklch(0.995 0.003 250);
+  --zarc-panel-raised: oklch(1 0 0 / 0.9);
+  --zarc-inset: oklch(0.55 0.02 250 / 0.055);
+  --zarc-inset-strong: oklch(0.55 0.02 250 / 0.1);
+
+  --zarc-line: oklch(0.45 0.02 250 / 0.13);
+  --zarc-line-strong: oklch(0.45 0.02 250 / 0.22);
+  /* 玻璃面板顶缘的高光，营造真实的一层厚度。 */
+  --zarc-rim: oklch(1 0 0 / 0.85);
+
+  --zarc-fg: oklch(0.24 0.022 258);
+  --zarc-fg-soft: oklch(0.47 0.02 258);
+  --zarc-fg-faint: oklch(0.6 0.016 258);
+
+  --zarc-accent: oklch(0.62 0.128 192);
+  --zarc-accent-strong: oklch(0.55 0.135 192);
+  --zarc-accent-soft: oklch(0.78 0.095 192);
+  --zarc-accent-wash: oklch(0.62 0.128 192 / 0.11);
+  --zarc-accent-fg: oklch(0.99 0.01 192);
+
+  --zarc-success: oklch(0.6 0.135 156);
+  --zarc-warning: oklch(0.66 0.145 72);
+  --zarc-danger: oklch(0.58 0.205 25);
+  --zarc-info: oklch(0.58 0.135 255);
+
+  --zarc-shadow-soft: 0 1px 2px oklch(0.3 0.02 250 / 0.05),
+    0 12px 32px -14px oklch(0.3 0.02 250 / 0.22);
+  --zarc-shadow-lift: 0 2px 4px oklch(0.3 0.02 250 / 0.06),
+    0 22px 48px -18px oklch(0.3 0.02 250 / 0.3);
+  --zarc-shadow-glow: 0 10px 30px -10px oklch(0.62 0.128 192 / 0.55);
 }
 
 [data-theme="dark"] {
-  --bg-base: oklch(0.16 0.015 255);
-  --bg-grad-1: oklch(0.28 0.06 178 / 0.55);
-  --bg-grad-2: oklch(0.26 0.07 285 / 0.50);
-  --surface: oklch(0.22 0.015 255 / 0.58);
-  --surface-solid: oklch(0.21 0.015 255);
-  --surface-hover: oklch(0.26 0.018 255 / 0.7);
-  --border-soft: oklch(1 0 0 / 0.08);
-  --text-primary: oklch(0.96 0.005 240);
-  --text-secondary: oklch(0.74 0.012 250);
-  --text-muted: oklch(0.62 0.012 250);
-  --border-input: oklch(1 0 0 / 0.12);
+  color-scheme: dark;
+
+  --zarc-canvas: oklch(0.165 0.014 262);
+  --zarc-aurora-1: oklch(0.48 0.105 190 / 0.34);
+  --zarc-aurora-2: oklch(0.44 0.115 292 / 0.3);
+  --zarc-aurora-3: oklch(0.5 0.09 60 / 0.16);
+
+  --zarc-panel: oklch(0.245 0.016 262 / 0.62);
+  --zarc-panel-solid: oklch(0.215 0.016 262);
+  --zarc-panel-raised: oklch(0.275 0.017 262 / 0.8);
+  --zarc-inset: oklch(1 0 0 / 0.045);
+  --zarc-inset-strong: oklch(1 0 0 / 0.085);
+
+  --zarc-line: oklch(1 0 0 / 0.085);
+  --zarc-line-strong: oklch(1 0 0 / 0.15);
+  --zarc-rim: oklch(1 0 0 / 0.1);
+
+  --zarc-fg: oklch(0.965 0.005 250);
+  --zarc-fg-soft: oklch(0.775 0.014 252);
+  --zarc-fg-faint: oklch(0.635 0.014 252);
+
+  --zarc-accent: oklch(0.78 0.125 190);
+  --zarc-accent-strong: oklch(0.85 0.115 190);
+  --zarc-accent-soft: oklch(0.88 0.085 190);
+  --zarc-accent-wash: oklch(0.78 0.125 190 / 0.14);
+  --zarc-accent-fg: oklch(0.17 0.03 200);
+
+  --zarc-success: oklch(0.78 0.145 158);
+  --zarc-warning: oklch(0.82 0.145 78);
+  --zarc-danger: oklch(0.7 0.185 22);
+  --zarc-info: oklch(0.75 0.12 255);
+
+  --zarc-shadow-soft: 0 1px 2px oklch(0 0 0 / 0.3), 0 14px 34px -16px oklch(0 0 0 / 0.65);
+  --zarc-shadow-lift: 0 2px 6px oklch(0 0 0 / 0.35), 0 26px 54px -20px oklch(0 0 0 / 0.75);
+  --zarc-shadow-glow: 0 10px 32px -12px oklch(0.78 0.125 190 / 0.45);
+}
+
+/* ───────────────────────────────────────────────────────────────
+   把运行时变量注册成 Tailwind 工具类。
+
+   必须用 `inline`：否则 Tailwind 会把值固化进 :root 上的 `--color-*`，
+   深浅色切换随之失效。另外绝不能用 `--text-*` 命名空间——那是字号而非
+   颜色，旧版 `text-primary/secondary/muted` 一个都没生成正是踩了这个坑。
+   ─────────────────────────────────────────────────────────────── */
+@theme inline {
+  --font-sans: "Manrope", "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, monospace;
+
+  --color-canvas: var(--zarc-canvas);
+  --color-panel: var(--zarc-panel);
+  --color-panel-solid: var(--zarc-panel-solid);
+  --color-panel-raised: var(--zarc-panel-raised);
+  --color-inset: var(--zarc-inset);
+  --color-inset-strong: var(--zarc-inset-strong);
+
+  --color-line: var(--zarc-line);
+  --color-line-strong: var(--zarc-line-strong);
+
+  --color-fg: var(--zarc-fg);
+  --color-fg-soft: var(--zarc-fg-soft);
+  --color-fg-faint: var(--zarc-fg-faint);
+
+  --color-accent: var(--zarc-accent);
+  --color-accent-strong: var(--zarc-accent-strong);
+  --color-accent-soft: var(--zarc-accent-soft);
+  --color-accent-wash: var(--zarc-accent-wash);
+  --color-accent-fg: var(--zarc-accent-fg);
+
+  --color-success: var(--zarc-success);
+  --color-warning: var(--zarc-warning);
+  --color-danger: var(--zarc-danger);
+  --color-info: var(--zarc-info);
+
+  --radius-panel: 1.25rem;
+  --radius-control: 0.75rem;
+  --radius-pill: 9999px;
+
+  --shadow-soft: var(--zarc-shadow-soft);
+  --shadow-lift: var(--zarc-shadow-lift);
+  --shadow-glow: var(--zarc-shadow-glow);
+
+  --animate-fade-in: fade-in 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-rise: rise 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-spin-slow: spin 1.1s linear infinite;
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-indeterminate: indeterminate 1.3s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+  --animate-breathe: breathe 2.6s ease-in-out infinite;
+  --animate-float: float 2.4s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.988);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(220%);
+  }
+}
+@keyframes indeterminate {
+  0% {
+    left: -35%;
+    right: 100%;
+  }
+  70%,
+  100% {
+    left: 100%;
+    right: -25%;
+  }
+}
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
 }
 
 @layer base {
-  html, body, #app {
+  html,
+  body,
+  #app {
     height: 100%;
   }
+
   body {
     font-family: var(--font-sans);
-    background: var(--bg-base);
-    color: var(--text-primary);
+    background: var(--zarc-canvas);
+    color: var(--zarc-fg);
     margin: 0;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    /* 桌面应用里划选正文没有意义，只在需要复制的地方按需放开。 */
+    user-select: none;
+    cursor: default;
   }
+
+  input,
+  textarea,
+  [data-selectable] {
+    user-select: text;
+    cursor: auto;
+  }
+
   * {
     scrollbar-width: thin;
-    scrollbar-color: var(--border-soft) transparent;
+    scrollbar-color: var(--zarc-line-strong) transparent;
   }
-  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
   *::-webkit-scrollbar-thumb {
-    background: var(--border-soft);
+    background: var(--zarc-line-strong);
+    border: 3px solid transparent;
+    background-clip: content-box;
     border-radius: var(--radius-pill);
   }
-  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--zarc-fg-faint);
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
   ::selection {
-    background: var(--color-accent);
-    color: white;
+    background: var(--zarc-accent);
+    color: var(--zarc-accent-fg);
+  }
+
+  /* 统一焦点环：键盘可达性的底线，鼠标点击不触发。 */
+  :focus-visible {
+    outline: 2px solid var(--zarc-accent);
+    outline-offset: 2px;
   }
 }
 
 @layer components {
-  .glass {
-    background: var(--surface);
-    backdrop-filter: blur(20px) saturate(140%);
-    -webkit-backdrop-filter: blur(20px) saturate(140%);
-    border: 1px solid var(--border-soft);
-    box-shadow: var(--shadow-soft);
+  .panel {
+    background: var(--zarc-panel);
+    backdrop-filter: blur(24px) saturate(150%);
+    -webkit-backdrop-filter: blur(24px) saturate(150%);
+    border: 1px solid var(--zarc-line);
+    box-shadow: var(--zarc-shadow-soft), inset 0 1px 0 0 var(--zarc-rim);
   }
-  .glass-solid {
-    background: var(--surface-solid);
-    border: 1px solid var(--border-soft);
+
+  .panel-solid {
+    background: var(--zarc-panel-solid);
+    border: 1px solid var(--zarc-line);
+    box-shadow: var(--zarc-shadow-soft);
   }
-  .orb {
+
+  /* 背景极光：几团模糊色斑，构成整体的底色氛围。 */
+  .aurora {
     position: fixed;
     border-radius: 50%;
-    filter: blur(80px);
-    opacity: 0.7;
+    filter: blur(90px);
     pointer-events: none;
     z-index: 0;
+    will-change: transform;
   }
-  .shimmer-bg {
-    background: linear-gradient(
-      90deg,
-      transparent 0%,
-      var(--color-accent-soft) 50%,
-      transparent 100%
-    );
-    background-size: 200% 100%;
+
+  /* 输入控件共用外观，避免十来处重复的长串工具类。 */
+  .control {
+    width: 100%;
+    border-radius: var(--radius-control);
+    border: 1px solid var(--zarc-line-strong);
+    background: var(--zarc-panel-solid);
+    padding: 0.625rem 0.875rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    color: var(--zarc-fg);
+    transition:
+      border-color 0.18s ease,
+      box-shadow 0.18s ease,
+      background-color 0.18s ease;
+  }
+  .control::placeholder {
+    color: var(--zarc-fg-faint);
+  }
+  .control:hover:not(:disabled):not(:focus) {
+    border-color: var(--zarc-fg-faint);
+  }
+  .control:focus {
+    outline: none;
+    border-color: var(--zarc-accent);
+    box-shadow: 0 0 0 3px var(--zarc-accent-wash);
+  }
+  .control:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .control[aria-invalid="true"] {
+    border-color: var(--zarc-danger);
+  }
+
+  /* 表单标签统一字号与字重，保证一列控件的标题行严格对齐。 */
+  .field-label {
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--zarc-fg-soft);
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
+  }
+}
+
+@layer utilities {
+  /* 进度条上流动的高光。 */
+  .sheen::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, oklch(1 0 0 / 0.4), transparent);
     animation: var(--animate-shimmer);
+  }
+}
+
+/* 尊重系统的「减少动态效果」设置：关掉装饰性动画，保留状态反馈。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .aurora {
+    display: none;
   }
 }

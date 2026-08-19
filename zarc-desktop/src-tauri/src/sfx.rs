@@ -100,6 +100,7 @@ pub(super) fn compress_sfx_archive_sync(
             &reporter,
             state.as_ref(),
             None,
+            request.threads,
         )
     } else {
         compress_file(
@@ -110,6 +111,7 @@ pub(super) fn compress_sfx_archive_sync(
             &reporter,
             state.as_ref(),
             None,
+            request.threads,
         )
     };
 
@@ -350,7 +352,7 @@ fn write_sidecar(
 }
 
 /// Path of the payload sidecar that accompanies an SFX exe.
-fn sidecar_path(exe: &Path) -> PathBuf {
+pub(super) fn sidecar_path(exe: &Path) -> PathBuf {
     let mut os_string = exe.as_os_str().to_owned();
     os_string.push(SIDECAR_SUFFIX);
     PathBuf::from(os_string)
@@ -410,7 +412,9 @@ fn extract_embedded_archive_from_path(
         .with_context(|| "请选择解压目标目录")?;
     fs::create_dir_all(&output_root)
         .with_context(|| format!("无法创建解压目录: {}", output_root.display()))?;
-    let output = output_root.join(&manifest.default_extract_name);
+    // The name comes from the archive, i.e. from whoever built the SFX. Joining
+    // it raw let `../../evil` or `C:/Windows/x` escape the chosen directory.
+    let output = output_root.join(sanitize_extract_name(&manifest.default_extract_name)?);
 
     let payload_path = if manifest.payload_in_sidecar {
         let sidecar = sidecar_path(host_path);
@@ -439,39 +443,36 @@ fn extract_embedded_archive_from_path(
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, section_reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
-    let output_result = match (manifest.encrypted, manifest.archive_kind) {
-        (true, ArchiveKind::TarZst) => {
-            fs::create_dir_all(&output)
-                .with_context(|| format!("无法创建解压目录: {}", output.display()))?;
-            let decrypt_reader =
-                EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default())?;
-            decompress_tar_from_reader(decrypt_reader, &output, state.as_ref())?;
-            Ok(count_source_bytes(&output)?)
+    // Delegated to the shared transactional path, which stages into a temp
+    // sibling and only renames into place on success.
+    //
+    // The old inline version had two serious defects. Every arm used `?`, so a
+    // mid-extraction failure returned from the function *before* reaching the
+    // cleanup below — the partial tree stayed on disk. And when cleanup did run
+    // it deleted `output` unconditionally, so a failed extraction destroyed a
+    // pre-existing file or directory of the same name that it had never written.
+    let output_result = if manifest.encrypted {
+        match EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default()) {
+            Ok(decrypt_reader) => decompress_reader_transactionally(
+                decrypt_reader,
+                manifest.archive_kind,
+                &output,
+                state.as_ref(),
+            ),
+            Err(err) => Err(err),
         }
-        (true, ArchiveKind::Zst) => {
-            let decrypt_reader =
-                EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default())?;
-            decompress_file_from_reader(decrypt_reader, &output, state.as_ref())
-        }
-        (false, ArchiveKind::TarZst) => {
-            fs::create_dir_all(&output)
-                .with_context(|| format!("无法创建解压目录: {}", output.display()))?;
-            decompress_tar_from_reader(progress_reader, &output, state.as_ref())?;
-            Ok(count_source_bytes(&output)?)
-        }
-        (false, ArchiveKind::Zst) => {
-            decompress_file_from_reader(progress_reader, &output, state.as_ref())
-        }
+    } else {
+        decompress_reader_transactionally(
+            progress_reader,
+            manifest.archive_kind,
+            &output,
+            state.as_ref(),
+        )
     };
 
     let output_bytes = match output_result {
         Ok(bytes) => bytes,
         Err(err) => {
-            if output.is_dir() {
-                let _ = fs::remove_dir_all(&output);
-            } else {
-                let _ = fs::remove_file(&output);
-            }
             reporter.fail(full_error_chain(&err));
             return Err(err);
         }
@@ -493,6 +494,36 @@ fn extract_embedded_archive_from_path(
         blake3_hash: hash,
         sidecar_path: None,
     })
+}
+
+/// Reduce an archive-supplied extraction name to a single, safe path component.
+///
+/// `default_extract_name` is attacker-controlled data read out of the SFX
+/// manifest. `output_root.join(raw)` honours absolute paths and `..`, so a
+/// crafted SFX could write anywhere the user could — outside the directory they
+/// picked. Keeping only the final component removes both escapes.
+fn sanitize_extract_name(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("自解压包内的输出名称为空，无法解压");
+    }
+
+    // Both separators are rejected regardless of host OS: a Windows-built SFX
+    // must not be able to traverse when opened on Linux, and vice versa.
+    let last = trimmed
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or_default();
+
+    let name = Path::new(last)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if name.is_empty() || name == "." || name == ".." {
+        bail!("自解压包内的输出名称非法: {raw}");
+    }
+    Ok(name)
 }
 
 fn read_embedded_manifest(exe_path: &Path) -> Result<Option<SfxManifest>> {
@@ -588,7 +619,7 @@ mod tests {
         let archive = temp.join(archive_name);
         let reporter =
             ProgressReporter::new(None, "compress", fs::metadata(&source).unwrap().len());
-        compress_file(&source, &archive, 8, password, &reporter, None, None).expect("compress");
+        compress_file(&source, &archive, 8, password, &reporter, None, None, Some(1)).expect("compress");
 
         let template = temp.join("template.exe");
         fs::write(&template, b"MZfake-host").expect("write template");
@@ -607,7 +638,7 @@ mod tests {
         let archive = temp.join("src.zst");
         let reporter =
             ProgressReporter::new(None, "compress", fs::metadata(&source).unwrap().len());
-        compress_file(&source, &archive, 8, password, &reporter, None, None).expect("compress");
+        compress_file(&source, &archive, 8, password, &reporter, None, None, Some(1)).expect("compress");
 
         let template = temp.join("template.exe");
         fs::write(&template, b"MZfake-host").expect("write template");
@@ -672,7 +703,7 @@ mod tests {
         let archive = temp.path().join("secret.zst.enc");
         let reporter =
             ProgressReporter::new(None, "compress", fs::metadata(&source).unwrap().len());
-        compress_file(&source, &archive, 8, Some("pw123"), &reporter, None, None)
+        compress_file(&source, &archive, 8, Some("pw123"), &reporter, None, None, Some(1))
             .expect("compress");
 
         let template = temp.path().join("template.exe");
@@ -816,5 +847,182 @@ mod tests {
         )
         .expect("renamed pair should still extract");
         assert_eq!(fs::read(dest.join("src")).expect("read"), b"renamed pair");
+    }
+
+    #[test]
+    fn sanitize_extract_name_blocks_traversal() {
+        assert_eq!(sanitize_extract_name("plain").unwrap(), "plain");
+        assert_eq!(
+            sanitize_extract_name("../../../etc/passwd").unwrap(),
+            "passwd"
+        );
+        assert_eq!(
+            sanitize_extract_name("C:\\Windows\\System32\\evil.dll").unwrap(),
+            "evil.dll"
+        );
+        // Backslashes are rejected on Linux too: an SFX built on Windows must not
+        // be able to traverse when it is opened elsewhere.
+        assert_eq!(sanitize_extract_name("a\\b\\c").unwrap(), "c");
+        assert_eq!(sanitize_extract_name("dir/").unwrap(), "dir");
+
+        assert!(sanitize_extract_name("").is_err());
+        assert!(sanitize_extract_name("   ").is_err());
+        assert!(sanitize_extract_name("..").is_err());
+        assert!(sanitize_extract_name("/").is_err());
+        assert!(sanitize_extract_name("../..").is_err());
+    }
+
+    #[test]
+    fn sfx_with_traversing_name_stays_inside_output_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("payload.txt");
+        fs::write(&source, b"contained").expect("write source");
+
+        let archive = temp.path().join("payload.zst");
+        let reporter =
+            ProgressReporter::new(None, "compress", fs::metadata(&source).unwrap().len());
+        compress_file(&source, &archive, 8, None, &reporter, None, None, Some(1))
+            .expect("compress");
+
+        // Hand-build an SFX whose manifest asks to be written outside the
+        // directory the user picked.
+        let template = temp.path().join("template.exe");
+        fs::write(&template, b"MZfake-host").expect("write template");
+        let output = temp.path().join("evil.sfx.exe");
+        let payload_length = fs::metadata(&archive).unwrap().len();
+        let manifest = SfxManifest {
+            payload_offset: 0,
+            payload_length,
+            encrypted: false,
+            archive_kind: ArchiveKind::Zst,
+            default_extract_name: "../escaped.txt".to_string(),
+            source_name: "payload.txt".to_string(),
+            created_by_version: env!("CARGO_PKG_VERSION").to_string(),
+            payload_in_sidecar: true,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let parent = output.parent().unwrap();
+        copy_host_exe(&template, &output, parent).expect("copy host");
+        write_sidecar(
+            &sidecar_path(&output),
+            &archive,
+            payload_length,
+            &manifest_bytes,
+            payload_length,
+            parent,
+        )
+        .expect("write sidecar");
+
+        let dest_root = temp.path().join("dest");
+        extract_embedded_archive_from_path(
+            &output,
+            EmbeddedDecompressRequest {
+                output_path: Some(path_to_string(&dest_root)),
+                password: None,
+            },
+            None,
+            None,
+        )
+        .expect("extract");
+
+        assert!(
+            dest_root.join("escaped.txt").exists(),
+            "must land inside the chosen directory"
+        );
+        assert!(
+            !temp.path().join("escaped.txt").exists(),
+            "path traversal escaped the output directory"
+        );
+    }
+
+    #[test]
+    fn failed_sfx_extraction_preserves_existing_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = build_small_sfx(temp.path(), "plain.txt", "plain.zst", Some("pw123"));
+
+        let dest_root = temp.path().join("dest");
+        fs::create_dir_all(&dest_root).expect("create dest");
+        // A pre-existing, unrelated file with the name the SFX wants to use.
+        // The old cleanup path deleted it on failure.
+        let victim = dest_root.join("plain");
+        fs::write(&victim, b"unrelated user data").expect("write victim");
+
+        let err = extract_embedded_archive_from_path(
+            &output,
+            EmbeddedDecompressRequest {
+                output_path: Some(path_to_string(&dest_root)),
+                password: Some("wrong".to_string()),
+            },
+            None,
+            None,
+        )
+        .expect_err("wrong password should fail");
+        assert!(!full_error_chain(&err).is_empty());
+
+        assert_eq!(
+            fs::read(&victim).expect("victim must survive"),
+            b"unrelated user data"
+        );
+    }
+
+    #[test]
+    fn failed_sfx_extraction_leaves_no_partial_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("tree");
+        fs::create_dir_all(source.join("nested")).expect("create tree");
+        for index in 0..40 {
+            fs::write(
+                source.join(format!("nested/file{index}.bin")),
+                vec![b'x'; 32 * 1024],
+            )
+            .expect("write file");
+        }
+
+        let archive = temp.path().join("tree.tar.zst");
+        let reporter = ProgressReporter::new(None, "compress", 0);
+        compress_directory(
+            &source,
+            &archive,
+            3,
+            true,
+            None,
+            &reporter,
+            None,
+            None,
+            Some(1),
+        )
+        .expect("compress dir");
+
+        // Truncate the payload so tar extraction dies partway through.
+        let raw = fs::read(&archive).expect("read archive");
+        let truncated = temp.path().join("tree.trunc.tar.zst");
+        fs::write(&truncated, &raw[..raw.len() / 2]).expect("write truncated");
+
+        let template = temp.path().join("template.exe");
+        fs::write(&template, b"MZfake-host").expect("write template");
+        let output = temp.path().join("tree.sfx.exe");
+        build_sfx_executable(&template, &truncated, &output, &source).expect("build sfx");
+
+        let dest_root = temp.path().join("dest");
+        extract_embedded_archive_from_path(
+            &output,
+            EmbeddedDecompressRequest {
+                output_path: Some(path_to_string(&dest_root)),
+                password: None,
+            },
+            None,
+            None,
+        )
+        .expect_err("truncated payload should fail");
+
+        let leftovers: Vec<_> = fs::read_dir(&dest_root)
+            .expect("read dest")
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "partial extraction left files behind: {leftovers:?}"
+        );
     }
 }

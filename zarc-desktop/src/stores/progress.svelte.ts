@@ -1,4 +1,5 @@
 import type { ProgressKind, ProgressPayload } from '../lib/api';
+import { translateBackendText } from '../lib/i18n/backend';
 
 export interface TaskProgress {
   percent: number;
@@ -9,9 +10,9 @@ export interface TaskProgress {
   done: boolean;
   error: string | null;
   visible: boolean;
-  /** 已收到至少一次后端事件；未收到前进度条走「准备中」的不确定态。 */
+  /** True once at least one backend event has arrived; before that the bar runs in the indeterminate "preparing" state. */
   started: boolean;
-  /** 任务标题，用于任务中心区分「正在压缩」与「正在读取归档列表」。 */
+  /** Task label, letting the Task Hub tell "compressing" apart from "reading the archive listing". */
   label: string;
 }
 
@@ -30,7 +31,7 @@ function emptyProgress(): TaskProgress {
   };
 }
 
-/** 后端只为 compress/decompress 发进度事件，benchmark 由 task store 驱动。 */
+/** The backend only emits progress events for compress/decompress; benchmark is driven by the task store. */
 type TrackedKind = Exclude<ProgressKind, 'benchmark'>;
 
 function isTracked(kind: ProgressKind): kind is TrackedKind {
@@ -51,7 +52,8 @@ class ProgressStore {
     slot.throughputMiBs = payload.throughputMiBs;
     slot.etaSeconds = payload.etaSeconds;
     slot.done = payload.done;
-    slot.error = payload.error;
+    // Backend errors arrive in Chinese; map them to the active locale for display.
+    slot.error = payload.error ? translateBackendText(payload.error) : payload.error;
     slot.visible = true;
     slot.started = true;
   }
@@ -62,10 +64,11 @@ class ProgressStore {
   }
 
   /**
-   * 把任务标记为失败。
+   * Mark the task as failed.
    *
-   * 前端侧的失败（参数校验、IPC 拒绝）不会触发后端的 `done` 事件，
-   * 没有这一步进度条会永远停在最后一次收到的百分比上。
+   * Frontend-side failures (validation, IPC rejections) never trigger the
+   * backend's `done` event; without this step the bar would sit forever at
+   * the last received percentage.
    */
   fail(kind: ProgressKind, message: string): void {
     if (!isTracked(kind)) return;
@@ -75,7 +78,7 @@ class ProgressStore {
     slot.visible = true;
   }
 
-  /** 任务成功收尾：补满进度条；已经处于失败态则保持不动。 */
+  /** Successful completion: fill the bar; a failed bar is left untouched. */
   succeed(kind: ProgressKind): void {
     if (!isTracked(kind)) return;
     const slot = this[kind];

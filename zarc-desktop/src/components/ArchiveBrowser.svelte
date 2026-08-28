@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ArchiveContentReport } from '../lib/api';
   import { formatBytes, formatCount, getFileIcon } from '../lib/format';
+  import { t } from '../lib/i18n/index.svelte';
   import Card from './ui/Card.svelte';
   import Button from './ui/Button.svelte';
   import Icon, { type IconName } from './ui/Icon.svelte';
@@ -17,18 +18,18 @@
   let query = $state('');
 
   interface Row {
-    /** 目录模式下是条目名，搜索模式下是完整相对路径。 */
+    /** Entry name in browse mode; full relative path in search mode. */
     key: string;
     name: string;
     size: number;
     isDir: boolean;
-    /** 目录里包含的文件数；文件恒为 1。 */
+    /** Number of files contained in a folder; always 1 for files. */
     files: number;
   }
 
   let searching = $derived(query.trim().length > 0);
 
-  /** 搜索是全局的：不受当前目录限制，否则用户得先猜对目录才能找到东西。 */
+  /** Search is global: not scoped to the current folder, otherwise users would have to guess the right folder before finding anything. */
   let searchRows = $derived.by<Row[]>(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return [];
@@ -62,7 +63,7 @@
     }
     return Array.from(items.values()).sort((a, b) => {
       if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-      return a.name.localeCompare(b.name, 'zh-CN');
+      return a.name.localeCompare(b.name);
     });
   });
 
@@ -70,7 +71,7 @@
   let truncated = $derived(searching && searchRows.length >= 500);
 
   let crumbs = $derived.by<{ label: string; path: string }[]>(() => {
-    const list = [{ label: '归档根目录', path: '' }];
+    const list = [{ label: t('shell.archiveRoot'), path: '' }];
     let cumulative = '';
     for (const part of currentPath.split('/').filter(Boolean)) {
       cumulative += part + '/';
@@ -90,8 +91,8 @@
   }
 
   const stats = $derived([
-    { label: '文件总数', value: formatCount(report.totalFiles) },
-    { label: '解压后体积', value: formatBytes(report.uncompressedSize) }
+    { label: t('field.totalFiles'), value: formatCount(report.totalFiles) },
+    { label: t('field.uncompressedSize'), value: formatBytes(report.uncompressedSize) }
   ]);
 
   const rowClass =
@@ -105,16 +106,16 @@
   <span class="min-w-0 flex-1 truncate font-medium text-fg" title={row.name}>{row.name}</span>
   <span class="shrink-0 text-xs text-fg-faint tabular-nums">
     {#if row.isDir}
-      {formatCount(row.files)} 项 · {formatBytes(row.size)}
+      {t('shell.itemCount', { count: formatCount(row.files), size: formatBytes(row.size) })}
     {:else}
       {formatBytes(row.size)}
     {/if}
   </span>
 {/snippet}
 
-<Card title="归档预览" subtitle="只读浏览，不会写入磁盘" icon="layers">
+<Card title={t('shell.browser.title')} subtitle={t('shell.browser.subtitle')} icon="layers">
   {#snippet actions()}
-    <Button variant="subtle" size="sm" icon="close" onclick={onClose}>关闭</Button>
+    <Button variant="subtle" size="sm" icon="close" onclick={onClose}>{t('shell.close')}</Button>
   {/snippet}
 
   <div class="flex flex-col gap-3">
@@ -133,25 +134,25 @@
         <code class="mono min-w-0 flex-1 truncate text-[0.7rem] text-fg-soft" data-selectable>
           {report.hash}
         </code>
-        <CopyButton text={report.hash} label="复制哈希" />
+        <CopyButton text={report.hash} label={t('shell.browser.copyHash')} />
       </div>
     {/if}
 
     <label class="relative block">
-      <span class="sr-only">搜索归档内的文件</span>
+      <span class="sr-only">{t('shell.browser.searchSr')}</span>
       <span class="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-fg-faint">
         <Icon name="search" size={15} />
       </span>
       <input
         class="control py-2 pr-9 pl-9 text-sm"
-        placeholder="搜索文件名或路径..."
+        placeholder={t('shell.browser.searchPlaceholder')}
         bind:value={query}
       />
       {#if searching}
         <button
           type="button"
           class="absolute top-1/2 right-2 -translate-y-1/2 rounded-control p-1 text-fg-faint transition-colors hover:text-fg"
-          aria-label="清除搜索"
+          aria-label={t('shell.browser.clearSearch')}
           onclick={() => (query = '')}
         >
           <Icon name="close" size={14} />
@@ -161,10 +162,12 @@
 
     {#if searching}
       <p class="text-xs text-fg-faint">
-        匹配 {formatCount(searchRows.length)} 个文件{truncated ? '（仅显示前 500 条）' : ''}
+        {t('shell.browser.matchCount', { count: formatCount(searchRows.length) })}{truncated
+          ? t('shell.browser.truncated')
+          : ''}
       </p>
     {:else}
-      <nav class="flex flex-wrap items-center gap-0.5 text-xs" aria-label="归档路径">
+      <nav class="flex flex-wrap items-center gap-0.5 text-xs" aria-label={t('shell.browser.pathNav')}>
         {#each crumbs as crumb, i (crumb.path)}
           {#if i > 0}
             <Icon name="chevronRight" size={12} class="text-fg-faint" />
@@ -192,19 +195,19 @@
           class="flex w-full items-center gap-2.5 rounded-control px-3 py-2 text-sm text-fg-soft transition-colors hover:bg-panel-solid hover:text-fg"
         >
           <Icon name="chevronLeft" size={16} />
-          <span class="font-medium">返回上一级</span>
+          <span class="font-medium">{t('shell.goUp')}</span>
         </button>
       {/if}
 
       {#if rows.length === 0}
         <p class="px-3 py-8 text-center text-sm text-fg-faint">
-          {searching ? '没有匹配的文件' : '这个目录是空的'}
+          {searching ? t('shell.browser.noMatch') : t('shell.browser.emptyFolder')}
         </p>
       {:else}
         <ul class="flex flex-col">
           {#each rows as row (row.key)}
             <li>
-              <!-- 目录可点进去，文件不可点：两者用不同标签，避免给静态行套上按钮语义。 -->
+              <!-- Folders are clickable, files are not: different tags keep button semantics off static rows. -->
               {#if row.isDir}
                 <button
                   type="button"

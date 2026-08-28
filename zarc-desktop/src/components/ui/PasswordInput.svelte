@@ -1,12 +1,13 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { passwordStrength } from '../../lib/format';
+  import { t } from '../../lib/i18n/index.svelte';
 
   interface Props {
     value: string;
     placeholder?: string;
     disabled?: boolean;
-    /** 是否显示强度条；解压时输入的是既有密码，评估强度没有意义。 */
+    /** Whether to show the strength bar; when extracting, the password already exists, so rating its strength is pointless. */
     showStrength?: boolean;
     id?: string;
   }
@@ -57,8 +58,8 @@
     <button
       type="button"
       onclick={() => (revealed = !revealed)}
-      aria-label={revealed ? '隐藏密码' : '显示密码'}
-      title={revealed ? '隐藏密码' : '显示密码'}
+      aria-label={revealed ? t('ui.hidePassword') : t('ui.showPassword')}
+      title={revealed ? t('ui.hidePassword') : t('ui.showPassword')}
       class="absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1.5 text-fg-faint transition-colors hover:bg-inset hover:text-fg"
     >
       <Icon name={revealed ? 'eyeOff' : 'eye'} size={15} />

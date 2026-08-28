@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import { toasts } from '../../stores/toast.svelte';
+  import { t } from '../../lib/i18n/index.svelte';
 
   interface Props {
     text: string;
@@ -8,7 +9,7 @@
     class?: string;
   }
 
-  let { text, label = '复制', class: klass = '' }: Props = $props();
+  let { text, label = t('ui.copy'), class: klass = '' }: Props = $props();
 
   let copied = $state(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -20,8 +21,8 @@
       clearTimeout(timer);
       timer = setTimeout(() => (copied = false), 1600);
     } catch {
-      // WebView 未授予剪贴板权限时给出可见反馈，而不是静默失败。
-      toasts.warn('复制失败', '当前环境不允许写入剪贴板，请手动选中文本复制。');
+      // Give visible feedback when the WebView denies clipboard access, instead of failing silently.
+      toasts.warn(t('ui.copyFailed'), t('ui.copyFailedDetail'));
     }
   }
 
@@ -32,7 +33,7 @@
   type="button"
   onclick={copy}
   aria-label={label}
-  title={copied ? '已复制' : label}
+  title={copied ? t('ui.copied') : label}
   class="rounded-md p-1 transition-colors {copied
     ? 'text-success'
     : 'text-fg-faint hover:bg-inset hover:text-fg'} {klass}"

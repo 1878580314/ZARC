@@ -11,7 +11,7 @@
     variant?: Variant;
     size?: Size;
     icon?: IconName;
-    /** 显示转圈并自动禁用；文案保持不变，避免按钮宽度跳动。 */
+    /** Shows a spinner and auto-disables; the label stays put to avoid button width jitter. */
     loading?: boolean;
     class?: string;
     children: Snippet;

@@ -1,23 +1,25 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import Icon, { type IconName } from './Icon.svelte';
+  import { t } from '../../lib/i18n/index.svelte';
 
   interface Props {
     value: string;
     placeholder?: string;
     disabled?: boolean;
-    /** 只读用于「宿主由后端决定」的场景（自解压模式），普通场景务必留空。 */
+    /** Read-only is for the "backend decides the host" case (self-extracting mode); leave it off in normal scenarios. */
     readonly?: boolean;
     invalid?: boolean;
     icon?: IconName;
     /**
-     * 手动输入定稿时回调（失焦、回车、清空）。
+     * Called when manual input is finalized (blur, Enter, clear).
      *
-     * 路径写进 store 会触发一次目录统计，逐字符回调等于每敲一个键就走一遍
-     * 文件树；因此只在用户"输完了"的时刻推送。
+     * Writing the path into the store triggers a directory scan; a per-keystroke
+     * callback would walk the file tree on every key pressed, so only push at
+     * the moment the user is "done typing".
      */
     onCommit?: (value: string) => void;
-    /** 右侧按钮组，如「文件」「目录」「选择」。 */
+    /** Right-side button group, e.g. "File", "Folder", "Browse". */
     actions?: Snippet;
   }
 
@@ -50,8 +52,9 @@
       <Icon name={icon} size={16} />
     </span>
     <!--
-      这里过去同时写了 `bind:value` 和 `readonly`，于是「留空则自动生成」的
-      输出路径根本敲不进去，只能靠文件对话框。现在只有明确传入 readonly 才只读。
+      This used to set both `bind:value` and `readonly`, so the "auto-generate
+      when empty" output path could not be typed into at all and only the file
+      dialog worked. Now it is read-only only when readonly is explicitly passed.
     -->
     <input
       type="text"
@@ -72,8 +75,8 @@
       <button
         type="button"
         onclick={clear}
-        aria-label="清空"
-        title="清空"
+        aria-label={t('ui.clear')}
+        title={t('ui.clear')}
         class="absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1 text-fg-faint transition-colors hover:bg-inset hover:text-fg"
       >
         <Icon name="close" size={14} />

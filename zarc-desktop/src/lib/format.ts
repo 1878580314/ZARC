@@ -1,7 +1,9 @@
 import type { OperationReport } from './api';
 import { api } from './api';
+import { t, numberLocale } from './i18n/index.svelte';
+import { translateBackendText } from './i18n/backend';
 
-export type PathKind = '文件' | '目录';
+export type PathKind = 'file' | 'folder';
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) {
@@ -26,14 +28,14 @@ export function formatSeconds(seconds: number): string {
     return '-';
   }
   if (seconds < 60) {
-    return `${seconds.toFixed(1)} 秒`;
+    return `${seconds.toFixed(1)} ${t('time.sec')}`;
   }
   const mins = Math.floor(seconds / 60);
   const secs = Math.round(seconds % 60);
   if (mins < 60) {
-    return `${mins} 分 ${secs} 秒`;
+    return `${mins} ${t('time.min')} ${secs} ${t('time.sec')}`;
   }
-  return `${Math.floor(mins / 60)} 小时 ${mins % 60} 分`;
+  return `${Math.floor(mins / 60)} ${t('time.hour')} ${mins % 60} ${t('time.min')}`;
 }
 
 export function formatDuration(ms: number): string {
@@ -44,34 +46,35 @@ export function formatDuration(ms: number): string {
 }
 
 export function formatCount(value: number): string {
-  return value.toLocaleString('zh-CN');
+  return value.toLocaleString(numberLocale());
 }
 
 export interface ReportField {
   label: string;
   value: string;
-  /** 长哈希 / 长路径需要等宽字体与换行，普通字段不需要。 */
+  /** Long hashes / long paths need a monospace font and wrapping; regular fields do not. */
   mono?: boolean;
 }
 
 /**
- * 把后端报告拆成结构化字段。
+ * Splits the backend report into structured fields.
  *
- * 旧实现返回一整段 `\n` 拼接的字符串塞进 `<pre>`，既无法排版也无法单独复制路径。
+ * The old implementation returned one long `\n`-joined string dumped into a `<pre>`,
+ * which allowed neither proper layout nor copying paths individually.
  */
 export function operationFields(report: OperationReport): ReportField[] {
   const fields: ReportField[] = [
-    { label: '源路径', value: report.sourcePath, mono: true },
-    { label: '输出路径', value: report.outputPath, mono: true },
-    { label: '源大小', value: formatBytes(report.sourceBytes) },
-    { label: '结果大小', value: formatBytes(report.outputBytes) },
-    { label: '吞吐', value: `${report.throughputMiBs.toFixed(2)} MiB/s` }
+    { label: t('field.sourcePath'), value: report.sourcePath, mono: true },
+    { label: t('field.outputPath'), value: report.outputPath, mono: true },
+    { label: t('field.sourceSize'), value: formatBytes(report.sourceBytes) },
+    { label: t('field.outputSize'), value: formatBytes(report.outputBytes) },
+    { label: t('field.throughput'), value: `${report.throughputMiBs.toFixed(2)} MiB/s` }
   ];
   if (report.compressionRatio !== null) {
-    fields.push({ label: '压缩率', value: `${report.compressionRatio.toFixed(2)}%` });
+    fields.push({ label: t('field.ratio'), value: `${report.compressionRatio.toFixed(2)}%` });
   }
   if (report.sidecarPath) {
-    fields.push({ label: '数据文件', value: report.sidecarPath, mono: true });
+    fields.push({ label: t('field.dataFile'), value: report.sidecarPath, mono: true });
   }
   if (report.blake3Hash) {
     fields.push({ label: 'BLAKE3', value: report.blake3Hash, mono: true });
@@ -79,36 +82,37 @@ export function operationFields(report: OperationReport): ReportField[] {
   return fields;
 }
 
-/** 结果卡片顶部的三个大数字。 */
+/** The three big numbers at the top of the result card. */
 export function operationHighlights(report: OperationReport): ReportField[] {
   const saved = report.sourceBytes - report.outputBytes;
   return [
-    { label: '结果大小', value: formatBytes(report.outputBytes) },
+    { label: t('field.outputSize'), value: formatBytes(report.outputBytes) },
     {
-      label: report.compressionRatio === null ? '体积变化' : '压缩率',
+      label: report.compressionRatio === null ? t('field.sizeChange') : t('field.ratio'),
       value:
         report.compressionRatio === null
           ? `${saved >= 0 ? '−' : '+'}${formatBytes(Math.abs(saved))}`
           : `${report.compressionRatio.toFixed(1)}%`
     },
-    { label: '耗时', value: formatDuration(report.durationMs) }
+    { label: t('field.elapsed'), value: formatDuration(report.durationMs) }
   ];
 }
 
 export function normalizeError(error: unknown): string {
+  let message: string;
   if (typeof error === 'string') {
-    return error;
+    message = error;
+  } else if (error instanceof Error) {
+    message = error.message;
+  } else if (error && typeof error === 'object') {
+    message = String(error);
+  } else {
+    message = t('error.unknown');
   }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  if (error && typeof error === 'object') {
-    return String(error);
-  }
-  return '发生未知错误。';
+  return translateBackendText(message);
 }
 
-/** 文件类型图标键，由 `Icon.svelte` 解析成内联 SVG。 */
+/** File-type icon key, resolved to an inline SVG by `Icon.svelte`. */
 export function getFileIcon(filename: string): string {
   const ext = filename.split('.').pop()?.toLowerCase();
   switch (ext) {
@@ -173,7 +177,7 @@ export function pathBaseName(path: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : path;
 }
 
-/** ZARC 分卷后缀形如 `.001`：至少三位且全为数字（与后端 `is_volume_suffix` 对齐）。 */
+/** ZARC volume suffixes look like `.001`: at least three characters, all digits (aligned with the backend `is_volume_suffix`). */
 function isVolumeSuffix(suffix: string): boolean {
   return suffix.length >= 3 && /^\d+$/.test(suffix);
 }
@@ -185,22 +189,22 @@ export function isArchivePath(path: string): boolean {
 }
 
 /**
- * 询问文件系统这条路径到底是什么。
+ * Asks the file system what this path actually is.
  *
- * 旧实现用 `basename.includes('.')` 猜，于是 `release.v2/` 被判成文件、
- * `Makefile` 被判成目录，进而把错误的 `includeRootDir` 语义传给后端。
- * 只有 IPC 失败时才退回那个启发式。
+ * The old implementation guessed with `basename.includes('.')`, so `release.v2/` was
+ * classified as a file and `Makefile` as a folder, passing the wrong `includeRootDir`
+ * semantics to the backend. Only on IPC failure do we fall back to that heuristic.
  */
 export async function pathKindLabel(path: string): Promise<PathKind> {
   try {
     const info = await api.inspectPath(path);
     if (info.exists) {
-      return info.isDir ? '目录' : '文件';
+      return info.isDir ? 'folder' : 'file';
     }
   } catch {
-    // 落到下面的启发式。
+    // Fall through to the heuristic below.
   }
-  return pathBaseName(path).includes('.') ? '文件' : '目录';
+  return pathBaseName(path).includes('.') ? 'file' : 'folder';
 }
 
 export function toInt(value: string, fallback: number): number {
@@ -224,14 +228,15 @@ export interface PasswordStrength {
 }
 
 /**
- * 粗粒度密码强度评估。
+ * Coarse-grained password strength estimate.
  *
- * 只做本地提示，不阻断提交——后端用 Argon2id 派生密钥，弱密码的代价由用户
- * 自行承担，但至少要让他们看见这个代价。
+ * A local hint only - it never blocks submission. The backend derives the key with
+ * Argon2id, so the cost of a weak password is the user's to bear, but they should
+ * at least be able to see it coming.
  */
 export function passwordStrength(password: string): PasswordStrength {
   if (password.length === 0) {
-    return { score: 0, label: '未设置', hint: '加密归档必须设置密码。' };
+    return { score: 0, label: t('pw.notSet'), hint: t('pw.hint.notSet') };
   }
 
   const classes =
@@ -247,11 +252,11 @@ export function passwordStrength(password: string): PasswordStrength {
   if (classes >= 4 && password.length >= 12) score += 1;
 
   const table: PasswordStrength[] = [
-    { score: 0, label: '很弱', hint: '至少 8 位，并混合大小写、数字与符号。' },
-    { score: 1, label: '较弱', hint: '再加长一些，并混合多种字符类型。' },
-    { score: 2, label: '中等', hint: '建议达到 14 位以上。' },
-    { score: 3, label: '较强', hint: '已足够日常使用。' },
-    { score: 4, label: '很强', hint: '密码遗失后归档无法恢复，请妥善保存。' }
+    { score: 0, label: t('pw.veryWeak'), hint: t('pw.hint.veryWeak') },
+    { score: 1, label: t('pw.weak'), hint: t('pw.hint.weak') },
+    { score: 2, label: t('pw.fair'), hint: t('pw.hint.fair') },
+    { score: 3, label: t('pw.strong'), hint: t('pw.hint.strong') },
+    { score: 4, label: t('pw.veryStrong'), hint: t('pw.hint.veryStrong') }
   ];
   return table[score];
 }

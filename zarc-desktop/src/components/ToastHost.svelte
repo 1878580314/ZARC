@@ -2,6 +2,7 @@
   import { flip } from 'svelte/animate';
   import { fly, scale } from 'svelte/transition';
   import { toasts, type ToastLevel } from '../stores/toast.svelte';
+  import { t } from '../lib/i18n/index.svelte';
   import Icon, { type IconName } from './ui/Icon.svelte';
   import CopyButton from './ui/CopyButton.svelte';
 
@@ -20,7 +21,7 @@
   };
 </script>
 
-<!-- 状态栏只能显示一行且会被下一条覆盖；吐司让并发的反馈都留得住。 -->
+<!-- The status bar shows a single line and gets overwritten by the next update; toasts keep concurrent feedback on screen. -->
 <div
   class="pointer-events-none fixed right-4 bottom-4 z-[200] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2"
   aria-live="polite"
@@ -52,12 +53,12 @@
 
       <div class="flex shrink-0 items-center gap-0.5">
         {#if toast.detail && toast.level === 'error'}
-          <CopyButton text={`${toast.title}\n${toast.detail}`} label="复制错误信息" />
+          <CopyButton text={`${toast.title}\n${toast.detail}`} label={t('shell.toast.copyError')} />
         {/if}
         <button
           type="button"
           onclick={() => toasts.dismiss(toast.id)}
-          aria-label="关闭通知"
+          aria-label={t('shell.toast.close')}
           class="rounded-md p-1 text-fg-faint transition-colors hover:bg-inset hover:text-fg"
         >
           <Icon name="close" size={14} />

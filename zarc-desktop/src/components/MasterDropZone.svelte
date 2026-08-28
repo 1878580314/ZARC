@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fade, scale } from 'svelte/transition';
   import { dropOverlay } from '../lib/dragdrop.svelte';
+  import { t } from '../lib/i18n/index.svelte';
   import Icon from './ui/Icon.svelte';
 </script>
 
@@ -22,17 +23,17 @@
       <div class="flex flex-col gap-1">
         <p class="text-lg font-bold tracking-tight text-fg">
           {#if dropOverlay.count > 1}
-            放开以载入 {dropOverlay.count} 个文件
+            {t('shell.drop.many', { count: dropOverlay.count })}
           {:else}
-            放开以载入
+            {t('shell.drop.one')}
           {/if}
         </p>
         <p class="text-sm text-fg-soft">
-          归档（.zst / .enc / .001 / .exe）会进入解压页，其余进入压缩页
+          {t('shell.drop.routing')}
         </p>
       </div>
       {#if dropOverlay.count > 1}
-        <p class="text-xs text-warning">一次只能处理一个路径，将使用第一个。</p>
+        <p class="text-xs text-warning">{t('shell.drop.multiWarn')}</p>
       {/if}
     </div>
   </div>

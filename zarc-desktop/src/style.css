@@ -9,12 +9,13 @@
 @import "@fontsource/noto-sans-sc/500.css";
 @import "@fontsource/noto-sans-sc/700.css";
 
-/* 深色变体跟随 index.html 的防闪烁脚本写入的 data-theme。 */
+/* The dark variant follows the data-theme attribute written by the anti-flicker script in index.html. */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* ───────────────────────────────────────────────────────────────
-   运行时调色板。:root 为浅色，[data-theme="dark"] 覆盖。
-   这些是「原始变量」，下面的 @theme inline 把它们暴露成工具类。
+   Runtime palette. :root is light; [data-theme="dark"] overrides it.
+   These are the raw variables; the @theme inline block below exposes
+   them as utility classes.
    ─────────────────────────────────────────────────────────────── */
 :root {
   color-scheme: light;
@@ -32,7 +33,7 @@
 
   --zarc-line: oklch(0.45 0.02 250 / 0.13);
   --zarc-line-strong: oklch(0.45 0.02 250 / 0.22);
-  /* 玻璃面板顶缘的高光，营造真实的一层厚度。 */
+  /* Highlight along the top edge of glass panels, giving them a sense of real thickness. */
   --zarc-rim: oklch(1 0 0 / 0.85);
 
   --zarc-fg: oklch(0.24 0.022 258);
@@ -96,11 +97,13 @@
 }
 
 /* ───────────────────────────────────────────────────────────────
-   把运行时变量注册成 Tailwind 工具类。
+   Register the runtime variables as Tailwind utility classes.
 
-   必须用 `inline`：否则 Tailwind 会把值固化进 :root 上的 `--color-*`，
-   深浅色切换随之失效。另外绝不能用 `--text-*` 命名空间——那是字号而非
-   颜色，旧版 `text-primary/secondary/muted` 一个都没生成正是踩了这个坑。
+   `inline` is required: otherwise Tailwind bakes the values into the
+   `--color-*` entries on :root, and dark/light switching stops working.
+   Also never use the `--text-*` namespace — that is font-size, not color;
+   the old `text-primary/secondary/muted` utilities generated nothing for
+   exactly that reason.
    ─────────────────────────────────────────────────────────────── */
 @theme inline {
   --font-sans: "Manrope", "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
@@ -219,7 +222,7 @@
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    /* 桌面应用里划选正文没有意义，只在需要复制的地方按需放开。 */
+    /* Selecting body text makes no sense in a desktop app; opt back in only where copying is needed. */
     user-select: none;
     cursor: default;
   }
@@ -258,7 +261,7 @@
     color: var(--zarc-accent-fg);
   }
 
-  /* 统一焦点环：键盘可达性的底线，鼠标点击不触发。 */
+  /* Unified focus ring: the baseline for keyboard accessibility; not triggered by mouse clicks. */
   :focus-visible {
     outline: 2px solid var(--zarc-accent);
     outline-offset: 2px;
@@ -280,7 +283,7 @@
     box-shadow: var(--zarc-shadow-soft);
   }
 
-  /* 背景极光：几团模糊色斑，构成整体的底色氛围。 */
+  /* Background aurora: a few blurred blobs that set the overall mood. */
   .aurora {
     position: fixed;
     border-radius: 50%;
@@ -290,7 +293,7 @@
     will-change: transform;
   }
 
-  /* 输入控件共用外观，避免十来处重复的长串工具类。 */
+  /* Shared look for input controls; avoids repeating long utility strings in a dozen places. */
   .control {
     width: 100%;
     border-radius: var(--radius-control);
@@ -324,7 +327,7 @@
     border-color: var(--zarc-danger);
   }
 
-  /* 表单标签统一字号与字重，保证一列控件的标题行严格对齐。 */
+  /* Uniform font size and weight for form labels, keeping title rows in a column of controls strictly aligned. */
   .field-label {
     font-size: 0.75rem;
     line-height: 1rem;
@@ -340,7 +343,7 @@
 }
 
 @layer utilities {
-  /* 进度条上流动的高光。 */
+  /* Flowing highlight on progress bars. */
   .sheen::after {
     content: "";
     position: absolute;
@@ -350,7 +353,7 @@
   }
 }
 
-/* 尊重系统的「减少动态效果」设置：关掉装饰性动画，保留状态反馈。 */
+/* Honor the system "prefers-reduced-motion" setting: turn off decorative animations, keep status feedback. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

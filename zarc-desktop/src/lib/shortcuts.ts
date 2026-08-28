@@ -4,17 +4,18 @@ import { task } from '../stores/task.svelte';
 import { theme } from '../stores/theme.svelte';
 
 export interface ShortcutHint {
-  /** 按键序列，逐个渲染成 <kbd>。 */
+  /** Key sequence, rendered one item per <kbd>. */
   keys: string[];
-  description: string;
+  /** i18n dictionary key; resolved via t() at render time so entries follow locale switches. */
+  descriptionKey: string;
 }
 
 export const SHORTCUTS: ShortcutHint[] = [
-  { keys: ['Ctrl', '1 / 2 / 3'], description: '切换压缩 / 解压 / 测试' },
-  { keys: ['Ctrl', 'Enter'], description: '执行当前视图的主操作' },
-  { keys: ['Esc'], description: '中止运行中的任务 / 关闭面板' },
-  { keys: ['Ctrl', 'D'], description: '切换深色 / 浅色主题' },
-  { keys: ['Ctrl', '/'], description: '打开这个面板' }
+  { keys: ['Ctrl', '1 / 2 / 3'], descriptionKey: 'store.sc.switchViews' },
+  { keys: ['Ctrl', 'Enter'], descriptionKey: 'store.sc.runAction' },
+  { keys: ['Esc'], descriptionKey: 'store.sc.esc' },
+  { keys: ['Ctrl', 'D'], descriptionKey: 'store.sc.theme' },
+  { keys: ['Ctrl', '/'], descriptionKey: 'store.sc.openPanel' }
 ];
 
 const VIEW_BY_DIGIT: Record<string, ViewId> = {
@@ -23,7 +24,7 @@ const VIEW_BY_DIGIT: Record<string, ViewId> = {
   '3': 'benchmark'
 };
 
-/** 各视图注册自己的主操作，Ctrl+Enter 时调用。 */
+/** Each view registers its primary action, invoked on Ctrl+Enter. */
 const primaryActions = new Map<ViewId, () => void>();
 
 export function registerPrimaryAction(view: ViewId, action: () => void): () => void {
@@ -44,7 +45,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 export function initShortcuts(): () => void {
   function onKeydown(event: KeyboardEvent): void {
-    // Esc 即使在输入框里也应当有效——那是最需要它的时刻。
+    // Esc must work even inside text fields — that is when it is needed most.
     if (event.key === 'Escape') {
       if (app.shortcutsOpen) {
         event.preventDefault();
@@ -60,7 +61,7 @@ export function initShortcuts(): () => void {
     if (!mod) return;
 
     if (event.key === 'Enter') {
-      // 输入框内也允许提交，这是表单的通行约定。
+      // Submitting from inside a text field is the usual form convention.
       const action = primaryActions.get(app.currentView);
       if (action) {
         event.preventDefault();
@@ -69,7 +70,7 @@ export function initShortcuts(): () => void {
       return;
     }
 
-    // 其余组合键在输入框内不拦截，避免抢走 Ctrl+A/C/V。
+    // Don't intercept other combos inside text fields, to keep Ctrl+A/C/V intact.
     if (isTypingTarget(event.target)) return;
 
     const view = VIEW_BY_DIGIT[event.key];

@@ -7,6 +7,7 @@
   import { registerPrimaryAction } from '../lib/shortcuts';
   import { api, type ArchiveContentReport, type OperationReport } from '../lib/api';
   import { emptyToNull, formatBytes, pathBaseName } from '../lib/format';
+  import { t } from '../lib/i18n/index.svelte';
   import Card from './ui/Card.svelte';
   import Button from './ui/Button.svelte';
   import Field from './ui/Field.svelte';
@@ -23,7 +24,7 @@
   let report = $state<OperationReport | null>(null);
   let browserReport = $state<ArchiveContentReport | null>(null);
   let touched = $state(false);
-  /** 预览与解压共用 decompress 槽位，用它区分「读列表」和「真解压」。 */
+  /** Preview and extraction share the decompress slot; this flag tells "reading the list" apart from a real extraction. */
   let previewing = $state(false);
 
   let isSfx = $derived(app.isSfx);
@@ -31,27 +32,27 @@
   let busy = $derived(task.busy);
   let running = $derived(task.activeKind === 'decompress');
 
-  let sourceError = $derived(touched && !source ? '请先选择要解压的归档文件。' : undefined);
+  let sourceError = $derived(touched && !source ? t('decompress.error.noSource') : undefined);
   let outputError = $derived(
-    touched && isSfx && !output.trim() ? '自解压模式必须指定输出目录。' : undefined
+    touched && isSfx && !output.trim() ? t('decompress.error.outputRequired') : undefined
   );
 
   let outputPlaceholder = $derived(
     isSfx && app.sfxInfo
-      ? `选择输出目录，将生成 ${app.sfxInfo.defaultExtractName}`
-      : '留空则解压到归档所在目录'
+      ? t('decompress.outputPlaceholder.sfx', { name: app.sfxInfo.defaultExtractName })
+      : t('decompress.outputPlaceholder.default')
   );
 
   $effect(() => registerPrimaryAction('decompress', submit));
 
   async function pickSource(): Promise<void> {
     const selected = await open({
-      title: '选择归档文件',
+      title: t('decompress.dialog.pickArchive'),
       multiple: false,
       directory: false,
       filters: [
-        { name: 'ZARC 归档', extensions: ['zst', 'enc', 'exe'] },
-        { name: '全部文件', extensions: ['*'] }
+        { name: t('decompress.filter.zarc'), extensions: ['zst', 'enc', 'exe'] },
+        { name: t('decompress.filter.all'), extensions: ['*'] }
       ]
     });
     if (typeof selected === 'string') {
@@ -61,27 +62,27 @@
   }
 
   async function pickOutput(): Promise<void> {
-    const selected = await open({ title: '选择解压输出目录', multiple: false, directory: true });
+    const selected = await open({ title: t('decompress.dialog.pickOutput'), multiple: false, directory: true });
     if (typeof selected === 'string') output = selected;
   }
 
   async function preview(): Promise<void> {
     touched = true;
     if (!source) {
-      app.setStatus('请先选择归档文件。', 'error');
+      app.setStatus(t('decompress.error.archiveRequired'), 'error');
       return;
     }
     previewing = true;
     try {
-      const ok = await task.run('decompress', '正在读取归档列表...', async () => {
+      const ok = await task.run('decompress', t('decompress.running.list'), async () => {
         const listed = await api.listContent({
           archivePath: source,
           password: emptyToNull(password)
         });
         browserReport = listed;
-        app.setStatus(`已列出 ${listed.totalFiles} 个条目。`, 'success');
+        app.setStatus(t('decompress.status.listed', { count: listed.totalFiles }), 'success');
       });
-      // 预览只读元数据，没必要在任务中心留下一张 100% 的解压卡片。
+      // Preview only reads metadata; there's no point leaving a 100% decompress card in the task hub.
       if (ok) progress.hide('decompress');
     } finally {
       previewing = false;
@@ -91,17 +92,23 @@
   async function submit(): Promise<void> {
     touched = true;
     if (!isSfx && !source) {
-      app.setStatus('请先选择归档文件。', 'error');
-      toasts.warn('还没有选择归档', '点击「选择」，也可以直接把归档拖进窗口。');
+      app.setStatus(t('decompress.error.archiveRequired'), 'error');
+      toasts.warn(t('toast.noArchive'), t('decompress.hint.noArchive'));
       return;
     }
     if (isSfx && !output.trim()) {
-      app.setStatus('请选择解压输出目录。', 'error');
-      toasts.warn('还没有选择输出目录', '自解压包不知道该把文件放到哪里。');
+      app.setStatus(t('decompress.error.outputFolderRequired'), 'error');
+      toasts.warn(t('decompress.toast.noOutput'), t('decompress.hint.noOutput'));
+      return;
+    }
+    if (isSfx && app.sfxInfo && !app.sfxInfo.payloadReady) {
+      const name = `${pathBaseName(app.sfxInfo.hostPath)}.payload`;
+      app.setStatus(t('shell.sfx.payloadMissingTag'), 'error');
+      toasts.warn(t('shell.sfx.payloadMissingTag'), t('shell.sfx.payloadMissing', { name }));
       return;
     }
 
-    const ok = await task.run('decompress', `正在解压 ${pathBaseName(source)}...`, async () => {
+    const ok = await task.run('decompress', t('decompress.running', { name: pathBaseName(source) }), async () => {
       report = isSfx
         ? await api.extractEmbedded({
             outputPath: emptyToNull(output),
@@ -112,11 +119,11 @@
             outputPath: emptyToNull(output),
             password: emptyToNull(password)
           });
-      app.setStatus(`解压完成: ${report.outputPath}`, 'success');
+      app.setStatus(t('decompress.status.done', { path: report.outputPath }), 'success');
     });
 
     if (ok && report) {
-      toasts.success('解压完成', report.outputPath);
+      toasts.success(t('toast.extractionComplete'), report.outputPath);
     }
   }
 </script>
@@ -125,21 +132,21 @@
   <SfxBanner />
 
   <Card
-    title="解压设置"
-    subtitle={isSfx ? '归档已内嵌，只需决定放到哪里' : '选择归档并指定输出位置'}
+    title={t('decompress.settingsCard.title')}
+    subtitle={isSfx ? t('decompress.settingsCard.subtitle.sfx') : t('decompress.settingsCard.subtitle.default')}
     icon="decompress"
   >
     {#snippet actions()}
       {#if app.sfxInfo?.encrypted || (!isSfx && source.toLowerCase().endsWith('.enc'))}
-        <Tag tone="warning" icon="shield">需要密码</Tag>
+        <Tag tone="warning" icon="shield">{t('decompress.tag.passwordRequired')}</Tag>
       {/if}
     {/snippet}
 
     <div class="flex flex-col gap-4">
       <Field
-        label="归档源"
+        label={t('decompress.archiveSource')}
         error={sourceError}
-        hint={isSfx ? '自解压模式下由程序自身提供，不可更改。' : undefined}
+        hint={isSfx ? t('decompress.archiveSourceHint.sfx') : undefined}
       >
         {#snippet aside()}
           {#if isSfx && app.sfxInfo}
@@ -152,11 +159,11 @@
           icon="archive"
           readonly={isSfx}
           invalid={Boolean(sourceError)}
-          placeholder="选择 .zst / .enc / .001 归档"
+          placeholder={t('decompress.sourcePlaceholder')}
         >
           {#snippet actions()}
             <Button variant="ghost" size="sm" icon="folder" onclick={pickSource} disabled={isSfx}>
-              选择
+              {t('browse')}
             </Button>
             <Button
               variant="ghost"
@@ -166,13 +173,13 @@
               loading={previewing}
               disabled={isSfx || (busy && !previewing)}
             >
-              预览
+              {t('decompress.preview')}
             </Button>
           {/snippet}
         </PathInput>
       </Field>
 
-      <Field label="输出目录" error={outputError}>
+      <Field label={t('decompress.outputFolder')} error={outputError}>
         <PathInput
           bind:value={output}
           icon="folder"
@@ -180,23 +187,23 @@
           placeholder={outputPlaceholder}
         >
           {#snippet actions()}
-            <Button variant="ghost" size="sm" icon="folder" onclick={pickOutput}>选择</Button>
+            <Button variant="ghost" size="sm" icon="folder" onclick={pickOutput}>{t('browse')}</Button>
           {/snippet}
         </PathInput>
       </Field>
 
-      <Field label="密码" hint="非加密归档留空即可。">
-        <PasswordInput bind:value={password} placeholder="加密归档请输入密码" />
+      <Field label={t('decompress.password')} hint={t('decompress.passwordHint')}>
+        <PasswordInput bind:value={password} placeholder={t('decompress.passwordPlaceholder')} />
       </Field>
 
       <div class="flex items-center gap-3 border-t border-line pt-4">
         <Button
           icon="play"
           loading={running && !previewing}
-          disabled={busy && !running}
+          disabled={(busy && !running) || (isSfx && app.sfxInfo !== null && !app.sfxInfo.payloadReady)}
           onclick={submit}
         >
-          开始解压
+          {t('decompress.submit')}
         </Button>
         {#if running && !previewing}
           <Button
@@ -205,7 +212,7 @@
             disabled={task.aborting}
             onclick={() => task.requestAbort()}
           >
-            {task.aborting ? '正在停止' : '停止'}
+            {task.aborting ? t('task.stopping') : t('task.stop')}
           </Button>
         {/if}
         <span class="ml-auto text-[0.7rem] text-fg-faint">Ctrl + Enter</span>
@@ -213,10 +220,10 @@
     </div>
   </Card>
 
-  <!-- 自解压模式没有侧栏任务中心，进度只能在这里就地显示。 -->
+  <!-- Self-extracting mode has no sidebar task hub, so progress is shown inline here. -->
   {#if isSfx && progress.decompress.visible}
     <div class="panel rounded-panel px-5 py-4">
-      <ProgressBar progress={progress.decompress} label="正在解压..." />
+      <ProgressBar progress={progress.decompress} label={t('decompress.progressLabel')} />
     </div>
   {/if}
 
@@ -225,6 +232,6 @@
   {/if}
 
   {#if report}
-    <ResultCard title="解压完成" {report} onDismiss={() => (report = null)} />
+    <ResultCard title={t('toast.extractionComplete')} {report} onDismiss={() => (report = null)} />
   {/if}
 </div>

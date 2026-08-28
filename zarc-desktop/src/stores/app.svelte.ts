@@ -1,6 +1,7 @@
 import type { EmbeddedArchiveInfo, PathInfo, ViewId } from '../lib/api';
 import { api } from '../lib/api';
 import type { PathKind } from '../lib/format';
+import { t } from '../lib/i18n/index.svelte';
 
 export type StatusLevel = 'idle' | 'busy' | 'success' | 'error';
 
@@ -12,26 +13,27 @@ export interface AppStatus {
 class AppStore {
   currentView = $state<ViewId>('compress');
   sfxInfo = $state<EmbeddedArchiveInfo | null>(null);
-  status = $state<AppStatus>({ message: '就绪', level: 'idle' });
+  status = $state<AppStatus>({ message: t('status.ready'), level: 'idle' });
 
-  // 跨视图共享的数据源；这里是唯一真相，视图不再各自持有副本。
+  // Data sources shared across views; this is the single source of truth, and
+  // views no longer keep their own copies.
   compressSource = $state('');
-  compressKind = $state<PathKind>('文件');
+  compressKind = $state<PathKind>('file');
   decompressSource = $state('');
   benchmarkSource = $state('');
-  benchmarkKind = $state<PathKind>('文件');
+  benchmarkKind = $state<PathKind>('file');
 
-  /** 压缩源的实测体积，用于在提交前展示预期规模。 */
+  /** Measured size of the compression source, shown before submitting to set expectations. */
   compressInfo = $state<PathInfo | null>(null);
   compressInfoLoading = $state(false);
 
-  /** 压缩等级放在 store 里，性能测试页才能把推荐值一键写过来。 */
+  /** The compression level lives in the store so the benchmark view can write its recommendation here in one click. */
   compressLevel = $state(8);
 
-  /** 快捷键面板的开关，由侧边栏按钮和 Ctrl+/ 共同控制。 */
+  /** Shortcuts panel toggle, driven by the sidebar button and Ctrl+/. */
   shortcutsOpen = $state(false);
 
-  /** 递增序号，用于丢弃过期的 inspect 结果，避免快速换源时旧结果覆盖新结果。 */
+  /** Incrementing sequence number for discarding stale inspect results, so older ones never overwrite newer ones while the source changes rapidly. */
   #inspectSeq = 0;
 
   get isSfx(): boolean {
@@ -61,11 +63,11 @@ class AppStore {
     this.benchmarkKind = kind;
   }
 
-  /** 采纳性能测试给出的推荐等级并跳回压缩页。 */
+  /** Apply the level recommended by the benchmark and jump back to the Compress view. */
   applyRecommendedLevel(level: number): void {
     this.compressLevel = level;
     this.setView('compress');
-    this.setStatus(`已采用推荐等级 L${level}。`, 'success');
+    this.setStatus(t('status.recommendApplied', { level }), 'success');
   }
 
   async #measureCompressSource(path: string): Promise<void> {
@@ -81,7 +83,7 @@ class AppStore {
       if (seq !== this.#inspectSeq) return;
       this.compressInfo = info;
       if (info.exists) {
-        this.compressKind = info.isDir ? '目录' : '文件';
+        this.compressKind = info.isDir ? 'folder' : 'file';
       }
     } catch {
       if (seq !== this.#inspectSeq) return;
@@ -100,7 +102,7 @@ class AppStore {
       this.sfxInfo = info;
       this.decompressSource = info.hostPath;
       this.setView('decompress');
-      this.setStatus('已进入自解压模式，请选择输出目录。', 'success');
+      this.setStatus(t('status.sfxMode'), 'success');
     } catch (error) {
       console.error('Failed to detect embedded archive mode', error);
     }

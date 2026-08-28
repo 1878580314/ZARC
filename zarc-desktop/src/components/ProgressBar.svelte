@@ -1,27 +1,29 @@
 <script lang="ts">
   import type { TaskProgress } from '../stores/progress.svelte';
   import { formatBytes, formatSeconds } from '../lib/format';
+  import { t } from '../lib/i18n/index.svelte';
   import Icon from './ui/Icon.svelte';
 
   interface Props {
     progress: TaskProgress;
-    /** 运行中的描述文字；留空时回落到 store 记录的任务标题。 */
+    /** Description shown while running; falls back to the task label recorded in the store when empty. */
     label?: string;
     compact?: boolean;
   }
 
   let { progress, label, compact = false }: Props = $props();
 
-  let running = $derived(progress.label || label || '处理中...');
+  let running = $derived(progress.label || label || t('shell.processing'));
   let statusText = $derived(
-    progress.done ? (progress.error ? '任务失败' : '任务完成') : running
+    progress.done ? (progress.error ? t('taskFailed') : t('taskComplete')) : running
   );
   let width = $derived(`${Math.max(0, Math.min(progress.percent, 100)).toFixed(2)}%`);
   let etaText = $derived(progress.etaSeconds === null ? '—' : formatSeconds(progress.etaSeconds));
 
   /**
-   * 后端首个进度事件到达前 totalBytes 还是 0。
-   * 此时显示不确定态的往返条，而不是一根停在 0% 的死条。
+   * totalBytes is still 0 until the first progress event arrives from the
+   * backend. Show an indeterminate back-and-forth bar rather than a dead
+   * bar stuck at 0%.
    */
   let indeterminate = $derived(!progress.done && (!progress.started || progress.totalBytes === 0));
 
@@ -77,7 +79,7 @@
       <span>{progress.throughputMiBs.toFixed(1)} MiB/s</span>
       {#if !progress.done}
         <span class="opacity-40">·</span>
-        <span>剩余 {etaText}</span>
+        <span>{t('shell.etaRemaining', { eta: etaText })}</span>
       {/if}
     </div>
   {/if}

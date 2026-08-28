@@ -36,6 +36,8 @@ export interface EmbeddedArchiveInfo {
   defaultExtractName: string;
   encrypted: boolean;
   archiveKind: string;
+  /** False when the sidecar data file is missing next to the EXE (or was renamed). */
+  payloadReady: boolean;
 }
 
 export interface ProgressPayload {
@@ -80,7 +82,7 @@ export interface CompressRequest {
   splitSizeMib: number | null;
   enableLogging: boolean;
   deleteSourceAfter: boolean;
-  /** zstd 工作线程数；null 表示交由后端使用全部核心。 */
+  /** Number of zstd worker threads; null lets the backend use all cores. */
   threads: number | null;
 }
 
@@ -100,7 +102,7 @@ export interface BenchmarkRequest {
   minLevel?: number;
   maxLevel?: number;
   iterations?: number;
-  /** 必须与 Rust 端 `sample_size_mib` 的 camelCase 形式完全一致。 */
+  /** Must exactly match the camelCase form of the Rust-side `sample_size_mib`. */
   sampleSizeMib?: number;
   threads?: number | null;
 }
@@ -111,7 +113,7 @@ export interface PathInfo {
   isDir: boolean;
   sizeBytes: number;
   fileCount: number;
-  /** 目录条目数超过后端上限时为 true，此时 sizeBytes/fileCount 只是下界。 */
+  /** True when the directory entry count exceeds the backend limit; sizeBytes/fileCount are then lower bounds only. */
   truncated: boolean;
 }
 

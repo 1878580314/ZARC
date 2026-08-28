@@ -2,11 +2,12 @@
   import { slide } from 'svelte/transition';
   import { progress } from '../stores/progress.svelte';
   import { task } from '../stores/task.svelte';
+  import { t } from '../lib/i18n/index.svelte';
   import ProgressBar from './ProgressBar.svelte';
   import Button from './ui/Button.svelte';
   import Spinner from './ui/Spinner.svelte';
 
-  // 窄窗口下侧栏任务中心被收起，进度必须在主列有个落脚点。
+  // The sidebar Task Hub is hidden on narrow windows, so progress needs a home in the main column.
   let bars = $derived(
     [
       { key: 'compress', value: progress.compress },
@@ -27,7 +28,7 @@
     {#if benchRunning}
       <div class="flex items-center gap-2 text-xs font-medium text-accent">
         <Spinner size={13} />
-        正在逐级试跑压缩等级...
+        {t('shell.benchmarkWorking')}
       </div>
     {/if}
 
@@ -40,7 +41,7 @@
         loading={task.aborting}
         onclick={() => task.requestAbort()}
       >
-        {task.aborting ? '正在停止' : '停止任务'}
+        {task.aborting ? t('task.stopping') : t('task.stop')}
       </Button>
     {/if}
   </div>

@@ -4,8 +4,9 @@ import { app } from './app.svelte';
 import { progress } from './progress.svelte';
 import { toasts } from './toast.svelte';
 import { normalizeError } from '../lib/format';
+import { t } from '../lib/i18n/index.svelte';
 
-/** 抛出它可以跳过默认的错误吐司（调用方已自行提示）。 */
+/** Throw this to skip the default error toast (the caller has already surfaced the message). */
 export class SilentTaskError extends Error {}
 
 class TaskStore {
@@ -13,12 +14,12 @@ class TaskStore {
   activeKind = $state<ProgressKind | null>(null);
   aborting = $state(false);
 
-  /** 用户主动中止：这不是错误，提示语气应当不同。 */
+  /** User-initiated abort: not an error, so the messaging should sound different. */
   #abortRequested = false;
 
   async run(kind: ProgressKind, statusText: string, fn: () => Promise<void>): Promise<boolean> {
     if (this.busy) {
-      toasts.warn('已有任务在运行', '请等待当前任务结束，或先点击「停止」。');
+      toasts.warn(t('toast.onePathOnly'), t('store.busyHint'));
       return false;
     }
 
@@ -37,12 +38,12 @@ class TaskStore {
       const message = normalizeError(error);
       progress.fail(kind, message);
       if (this.#abortRequested) {
-        app.setStatus('任务已中止。', 'idle');
-        toasts.info('任务已中止');
+        app.setStatus(t('status.taskAborted'), 'idle');
+        toasts.info(t('toast.taskAborted'));
       } else {
         app.setStatus(message, 'error');
         if (!(error instanceof SilentTaskError)) {
-          toasts.error('任务失败', message);
+          toasts.error(t('taskFailed'), message);
         }
       }
       return false;
@@ -51,7 +52,8 @@ class TaskStore {
       this.activeKind = null;
       this.aborting = false;
       this.#abortRequested = false;
-      // 基准测试没有进度条槽位；压缩/解压保留终态卡片，由下一次任务或用户清除。
+      // Benchmark has no progress slot; compress/extract keep their final-state card
+      // until the next task starts or the user dismisses it.
       if (kind === 'benchmark') {
         progress.hide(kind);
       }
@@ -63,7 +65,7 @@ class TaskStore {
     this.#abortRequested = true;
     this.aborting = true;
     void api.abort();
-    app.setStatus('正在停止任务...', 'busy');
+    app.setStatus(t('status.stoppingTask'), 'busy');
   }
 }
 

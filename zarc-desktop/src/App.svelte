@@ -29,10 +29,12 @@
     let disposed = false;
 
     /**
-     * 异步注册的监听器要考虑「还没注册完组件就卸了」。
+     * Asynchronously registered listeners must handle "the component unmounts before
+     * registration completes."
      *
-     * 旧实现把 unlisten 赋值写在 `.then()` 里，销毁函数先跑一步就读到 undefined，
-     * 监听器从此留在后台无人回收。
+     * The old implementation assigned unlisten inside `.then()`, so the destroy function
+     * could run first and read undefined, leaving the listener stranded in the background
+     * with nothing to clean it up.
      */
     function track(fn: () => void): void {
       if (disposed) fn();
@@ -51,7 +53,7 @@
 </script>
 
 <div class="relative h-full w-full overflow-hidden bg-canvas">
-  <!-- 背景极光：三团低饱和色斑撑起整体氛围，不参与命中测试。 -->
+  <!-- Background aurora: three low-saturation blobs set the overall mood; excluded from hit testing. -->
   <div
     class="aurora -top-48 -left-40 h-[34rem] w-[34rem]"
     style="background: var(--zarc-aurora-1)"
@@ -80,7 +82,7 @@
       {/if}
 
       <div class="mx-auto w-full max-w-3xl flex-1 pb-6">
-        <!-- key 让切换视图时有一次轻微的横向位移，形成方向感。 -->
+        <!-- The key block adds a slight horizontal shift on view switches, giving the transition a sense of direction. -->
         {#key view}
           <div in:fly={{ x: 12, duration: 220, opacity: 0 }}>
             {#if view === 'decompress'}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { clamp } from '../../lib/format';
+  import { t } from '../../lib/i18n/index.svelte';
 
   interface Props {
     value: number;
@@ -22,15 +23,16 @@
   }: Props = $props();
 
   /**
-   * 输入框里的原始文本。
+   * The raw text inside the input.
    *
-   * 不能直接 `bind:value` 到数字：那样一旦用户删空内容就立刻被写回 0，
-   * 光标后面还跟着一个删不掉的零。这里让文本自由编辑，失焦时才归一化。
+   * Don't `bind:value` directly to a number: the moment the user clears the
+   * field it would be written back to 0, leaving an undeletable zero after the
+   * cursor. Here the text is edited freely and normalized only on blur.
    */
   let draft = $state(String(value));
   let editing = $state(false);
 
-  // 外部（拖放、预设、SFX 模式）改动 value 时同步回文本框。
+  // Sync external value changes (drag-and-drop, presets, SFX mode) back into the field.
   $effect(() => {
     if (!editing) {
       draft = String(value);
@@ -40,8 +42,9 @@
   function commit(): void {
     editing = false;
     const parsed = Number.parseInt(draft, 10);
-    // min/max 过去只是透传给 <input>，浏览器并不阻止程序化的越界值，
-    // 于是「最低等级 999」会原样发给后端。这里真正夹紧。
+    // min/max used to be passed straight through to <input>, and the browser doesn't
+    // stop programmatic out-of-range values, so "minimum level 999" went to the backend
+    // as-is. Clamp for real here.
     value = Number.isFinite(parsed) ? clamp(parsed, min, max) : min;
     draft = String(value);
   }
@@ -87,7 +90,7 @@
       class="pointer-events-auto flex h-6 w-6 items-center justify-center rounded-md text-sm font-bold text-fg-faint transition-colors hover:bg-inset hover:text-fg disabled:opacity-30 disabled:hover:bg-transparent"
       onclick={() => nudge(-step)}
       disabled={disabled || value <= min}
-      aria-label="减少"
+      aria-label={t('ui.decrease')}
       tabindex="-1"
     >
       −
@@ -97,7 +100,7 @@
       class="pointer-events-auto flex h-6 w-6 items-center justify-center rounded-md text-sm font-bold text-fg-faint transition-colors hover:bg-inset hover:text-fg disabled:opacity-30 disabled:hover:bg-transparent"
       onclick={() => nudge(step)}
       disabled={disabled || value >= max}
-      aria-label="增加"
+      aria-label={t('ui.increase')}
       tabindex="-1"
     >
       +

@@ -6,7 +6,7 @@
     title?: string;
     subtitle?: string;
     icon?: IconName;
-    /** 标题行右侧的操作区（按钮、标签等）。 */
+    /** Action area on the right of the header row (buttons, tags, etc.). */
     actions?: Snippet;
     class?: string;
     children: Snippet;

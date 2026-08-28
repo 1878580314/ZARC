@@ -6,6 +6,8 @@
   import { registerPrimaryAction } from '../lib/shortcuts';
   import { api, type BenchmarkReport } from '../lib/api';
   import { formatBytes, formatDuration, pathBaseName } from '../lib/format';
+  import { t } from '../lib/i18n/index.svelte';
+  import { translateBackendText } from '../lib/i18n/backend';
   import Card from './ui/Card.svelte';
   import Button from './ui/Button.svelte';
   import Field from './ui/Field.svelte';
@@ -22,19 +24,19 @@
   let report = $state<BenchmarkReport | null>(null);
   let touched = $state(false);
 
-  // 与压缩页一样，源路径的唯一真相在 store 里。
+  // Like the Compress view, the store is the single source of truth for the source path.
   let source = $derived(app.benchmarkSource);
   let kind = $derived(app.benchmarkKind);
 
   let busy = $derived(task.busy);
   let running = $derived(task.activeKind === 'benchmark');
 
-  let sourceError = $derived(touched && !source ? '请先选择用于测试的文件或目录。' : undefined);
-  let rangeError = $derived(minLevel > maxLevel ? '最低等级不能高于最高等级。' : undefined);
+  let sourceError = $derived(touched && !source ? t('benchmark.error.noSource') : undefined);
+  let rangeError = $derived(minLevel > maxLevel ? t('benchmark.error.range') : undefined);
 
   let estimatedRuns = $derived(Math.max(0, maxLevel - minLevel + 1) * iterations);
 
-  // 分数、吞吐、体积各自的极值，用来把柱状图归一化。
+  // Extremes of score, throughput, and size, used to normalize the bars.
   let bestThroughput = $derived(
     report && report.results.length > 0
       ? Math.max(...report.results.map((r) => r.meanThroughputMiBs))
@@ -54,20 +56,20 @@
   $effect(() => registerPrimaryAction('benchmark', submit));
 
   async function pickFile(): Promise<void> {
-    const selected = await open({ title: '选择测试文件', multiple: false, directory: false });
-    if (typeof selected === 'string') app.setBenchmarkSource(selected, '文件');
+    const selected = await open({ title: t('benchmark.dialog.pickFile'), multiple: false, directory: false });
+    if (typeof selected === 'string') app.setBenchmarkSource(selected, 'file');
   }
 
   async function pickDirectory(): Promise<void> {
-    const selected = await open({ title: '选择测试目录', multiple: false, directory: true });
-    if (typeof selected === 'string') app.setBenchmarkSource(selected, '目录');
+    const selected = await open({ title: t('benchmark.dialog.pickFolder'), multiple: false, directory: true });
+    if (typeof selected === 'string') app.setBenchmarkSource(selected, 'folder');
   }
 
   async function submit(): Promise<void> {
     touched = true;
     if (!source) {
-      app.setStatus('请先选择测试源路径。', 'error');
-      toasts.warn('还没有选择源路径', '挑一个有代表性的样本，结果才有参考价值。');
+      app.setStatus(t('benchmark.error.sourceRequired'), 'error');
+      toasts.warn(t('toast.noSource'), t('benchmark.hint.noSource'));
       return;
     }
     if (rangeError) {
@@ -75,7 +77,7 @@
       return;
     }
 
-    const ok = await task.run('benchmark', `正在评估 ${pathBaseName(source)}...`, async () => {
+    const ok = await task.run('benchmark', t('benchmark.running', { name: pathBaseName(source) }), async () => {
       report = await api.benchmark({
         sourcePath: source,
         minLevel,
@@ -84,15 +86,15 @@
         sampleSizeMib: sampleSize,
         threads: threads > 0 ? threads : null
       });
-      app.setStatus(`测试完成，推荐压缩等级 L${report.recommendedLevel}。`, 'success');
+      app.setStatus(t('benchmark.status.done', { level: report.recommendedLevel }), 'success');
     });
 
     if (ok && report) {
-      toasts.success('测试完成', `推荐等级 L${report.recommendedLevel}，可一键应用到压缩页。`);
+      toasts.success(t('toast.benchmarkComplete'), t('benchmark.hint.recommended', { level: report.recommendedLevel }));
     }
   }
 
-  /** 体积条：越短越好，所以按「相对最差值」缩放，视觉上短即优。 */
+  /** Size bars: shorter is better, so they are scaled against the worst value - visually, shorter means better. */
   function ratioWidth(value: number): number {
     if (worstRatio <= 0) return 6;
     return Math.max((value / worstRatio) * 100, 6);
@@ -105,50 +107,50 @@
 </script>
 
 <div class="flex flex-col gap-4 animate-[var(--animate-rise)]">
-  <Card title="测试设置" subtitle="在样本上逐级试跑，找出速度与体积的平衡点" icon="benchmark">
+  <Card title={t('benchmark.settingsCard.title')} subtitle={t('benchmark.settingsCard.subtitle')} icon="benchmark">
     {#snippet actions()}
-      <Tag tone={source ? 'accent' : 'neutral'}>{source ? kind : '未选择'}</Tag>
+      <Tag tone={source ? 'accent' : 'neutral'}>{source ? t(kind === 'folder' ? 'kind.folder' : 'kind.file') : t('notSelected')}</Tag>
     {/snippet}
 
     <div class="flex flex-col gap-4">
-      <Field label="测试源" error={sourceError}>
+      <Field label={t('benchmark.source')} error={sourceError}>
         <PathInput
           value={source}
           onCommit={(next) => app.setBenchmarkSource(next, kind)}
-          icon={kind === '目录' ? 'folder' : 'file'}
+          icon={kind === 'folder' ? 'folder' : 'file'}
           invalid={Boolean(sourceError)}
-          placeholder="挑一个有代表性的文件或目录"
+          placeholder={t('benchmark.sourcePlaceholder')}
         >
           {#snippet actions()}
-            <Button variant="ghost" size="sm" icon="file" onclick={pickFile}>文件</Button>
-            <Button variant="ghost" size="sm" icon="folder" onclick={pickDirectory}>目录</Button>
+            <Button variant="ghost" size="sm" icon="file" onclick={pickFile}>{t('kind.file')}</Button>
+            <Button variant="ghost" size="sm" icon="folder" onclick={pickDirectory}>{t('kind.folder')}</Button>
           {/snippet}
         </PathInput>
       </Field>
 
       <div class="grid grid-cols-2 gap-4">
-        <Field label="最低等级" error={rangeError}>
+        <Field label={t('benchmark.minLevel')} error={rangeError}>
           <NumberInput bind:value={minLevel} min={1} max={22} />
         </Field>
-        <Field label="最高等级">
+        <Field label={t('benchmark.maxLevel')}>
           <NumberInput bind:value={maxLevel} min={1} max={22} />
         </Field>
-        <Field label="每级轮数" hint="多轮取均值可以削平系统抖动。">
+        <Field label={t('benchmark.iterations')} hint={t('benchmark.hint.iterations')}>
           <NumberInput bind:value={iterations} min={1} max={12} />
         </Field>
-        <Field label="样本大小" hint="只取前若干 MiB 参与测试。">
+        <Field label={t('benchmark.sampleSize')} hint={t('benchmark.hint.sampleSize')}>
           <NumberInput bind:value={sampleSize} suffix="MiB" min={4} max={1024} />
         </Field>
       </div>
 
-      <Field label="工作线程" hint="0 表示使用全部可用核心；固定线程数便于横向对比。">
-        <NumberInput bind:value={threads} suffix="线程" min={0} max={256} />
+      <Field label={t('benchmark.threads')} hint={t('benchmark.threadsHint')}>
+        <NumberInput bind:value={threads} suffix={t('benchmark.threadsSuffix')} min={0} max={256} />
       </Field>
 
       <div class="flex items-center gap-2 rounded-control bg-inset px-3 py-2 text-xs text-fg-faint">
         <Icon name="info" size={14} />
         <span>
-          共需 {estimatedRuns} 次压缩，高等级耗时会显著拉长；测试期间只读取样本，不写入磁盘。
+          {t('benchmark.runsInfo', { runs: estimatedRuns })}
         </span>
       </div>
 
@@ -159,7 +161,7 @@
           disabled={(busy && !running) || Boolean(rangeError)}
           onclick={submit}
         >
-          开始测试
+          {t('benchmark.submit')}
         </Button>
         {#if running}
           <Button
@@ -168,7 +170,7 @@
             disabled={task.aborting}
             onclick={() => task.requestAbort()}
           >
-            {task.aborting ? '正在停止' : '停止'}
+            {task.aborting ? t('task.stopping') : t('task.stop')}
           </Button>
         {/if}
         <span class="ml-auto text-[0.7rem] text-fg-faint">Ctrl + Enter</span>
@@ -177,45 +179,46 @@
   </Card>
 
   {#if report}
-    <!-- snippet 是独立闭包，`{#if report}` 的收窄传不进去，这里先固定一份引用。 -->
+    <!-- Snippets are independent closures, so the `{#if report}` narrowing can't reach
+         inside; pin a local reference first. -->
     {@const rep = report}
-    <Card title="测试结果" subtitle={pathBaseName(rep.sourcePath)} icon="checkCircle">
+    <Card title={t('benchmark.resultsCard.title')} subtitle={pathBaseName(rep.sourcePath)} icon="checkCircle">
       {#snippet actions()}
         <Button
           size="sm"
           icon="check"
           onclick={() => app.applyRecommendedLevel(rep.recommendedLevel)}
         >
-          采用 L{rep.recommendedLevel}
+          {t('benchmark.useLevel', { level: rep.recommendedLevel })}
         </Button>
         <Button variant="subtle" size="sm" icon="close" onclick={() => (report = null)}>
-          关闭
+          {t('benchmark.close')}
         </Button>
       {/snippet}
 
       <div class="flex flex-col gap-4">
         <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <div class="rounded-control bg-accent-wash px-3 py-3 text-center">
-            <div class="text-[0.7rem] text-fg-faint">推荐等级</div>
+            <div class="text-[0.7rem] text-fg-faint">{t('benchmark.recommendedLevel')}</div>
             <div class="mt-1 text-xl font-extrabold text-accent tabular-nums">
               L{rep.recommendedLevel}
             </div>
           </div>
           <div class="rounded-control bg-inset px-3 py-3 text-center">
-            <div class="text-[0.7rem] text-fg-faint">样本大小</div>
+            <div class="text-[0.7rem] text-fg-faint">{t('benchmark.sampleSize')}</div>
             <div class="mt-1 text-xl font-extrabold text-fg tabular-nums">
               {formatBytes(rep.sampleBytes)}
             </div>
           </div>
           <div class="rounded-control bg-inset px-3 py-3 text-center">
-            <div class="text-[0.7rem] text-fg-faint">最高吞吐</div>
+            <div class="text-[0.7rem] text-fg-faint">{t('benchmark.peakThroughput')}</div>
             <div class="mt-1 text-xl font-extrabold text-fg tabular-nums">
               {bestThroughput.toFixed(0)}
               <span class="text-xs font-medium text-fg-faint">MiB/s</span>
             </div>
           </div>
           <div class="rounded-control bg-inset px-3 py-3 text-center">
-            <div class="text-[0.7rem] text-fg-faint">最优体积</div>
+            <div class="text-[0.7rem] text-fg-faint">{t('benchmark.bestRatio')}</div>
             <div class="mt-1 text-xl font-extrabold text-fg tabular-nums">
               {bestRatio.toFixed(1)}<span class="text-xs font-medium text-fg-faint">%</span>
             </div>
@@ -225,16 +228,16 @@
         {#if rep.note}
           <p class="flex items-start gap-2 rounded-control bg-inset px-3 py-2 text-xs leading-relaxed text-fg-soft">
             <Icon name="info" size={14} class="mt-px shrink-0 text-fg-faint" />
-            <span>{rep.note}</span>
+            <span>{translateBackendText(rep.note)}</span>
           </p>
         {/if}
 
         <div class="flex flex-col gap-1">
           <div class="flex items-center gap-3 px-2 text-[0.65rem] tracking-wide text-fg-faint">
-            <span class="w-9">等级</span>
-            <span class="flex-1">压缩后体积（越短越好）</span>
-            <span class="flex-1">吞吐（越长越快）</span>
-            <span class="w-16 text-right">耗时</span>
+            <span class="w-9">{t('benchmark.col.level')}</span>
+            <span class="flex-1">{t('benchmark.col.size')}</span>
+            <span class="flex-1">{t('benchmark.col.throughput')}</span>
+            <span class="w-16 text-right">{t('field.elapsed')}</span>
           </div>
 
           {#each rep.results as row (row.level)}

@@ -5,7 +5,7 @@
     max: number;
     step?: number;
     disabled?: boolean;
-    /** 刻度标记，形如 `[{ at: 3, label: '快' }]`。 */
+    /** Tick marks, e.g. `[{ at: 3, label: 'Fast' }]`. */
     marks?: { at: number; label: string }[];
     ariaLabel?: string;
     id?: string;
@@ -22,7 +22,7 @@
     id
   }: Props = $props();
 
-  // 已填充比例。原实现只有一条灰轨，看不出当前位置在整个量程里的相对深浅。
+  // Fill percentage. The old implementation was a plain gray track, so you couldn't tell where the position sits within the range.
   let fill = $derived(((value - min) / (max - min)) * 100);
 </script>
 
@@ -71,7 +71,7 @@
     opacity: 0.5;
   }
 
-  /* 轨道：已填充部分用主色，剩余部分用内陷色。 */
+  /* Track: the filled portion uses the accent color, the rest uses the inset color. */
   .zarc-range::-webkit-slider-runnable-track {
     height: 0.375rem;
     border-radius: var(--radius-pill);

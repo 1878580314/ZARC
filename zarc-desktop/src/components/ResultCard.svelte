@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { OperationReport } from '../lib/api';
   import { operationFields, operationHighlights } from '../lib/format';
+  import { t } from '../lib/i18n/index.svelte';
   import Card from './ui/Card.svelte';
   import Button from './ui/Button.svelte';
   import CopyButton from './ui/CopyButton.svelte';
@@ -16,14 +17,14 @@
   let highlights = $derived(operationHighlights(report));
   let fields = $derived(operationFields(report));
 
-  /** 一次性复制整份报告，便于贴进工单或聊天窗口。 */
+  /** Copy the whole report in one go, ready to paste into a ticket or chat window. */
   let plainText = $derived(fields.map((f) => `${f.label}: ${f.value}`).join('\n'));
 </script>
 
 <Card {title} icon="checkCircle" subtitle={report.operation} class="animate-[var(--animate-rise)]">
   {#snippet actions()}
-    <CopyButton text={plainText} label="复制完整报告" />
-    <Button variant="subtle" size="sm" onclick={onDismiss}>关闭</Button>
+    <CopyButton text={plainText} label={t('shell.copyFullReport')} />
+    <Button variant="subtle" size="sm" onclick={onDismiss}>{t('shell.close')}</Button>
   {/snippet}
 
   <div class="grid grid-cols-3 gap-3">
@@ -38,8 +39,10 @@
   </div>
 
   <!--
-    旧实现把整份报告拼成字符串塞进 <pre>：路径无法单独复制、哈希会撑爆横向
-    滚动条。改成定义列表后每一项都能独立对齐与复制。
+    The old implementation packed the whole report into a single <pre> string:
+    paths could not be copied individually and long hashes blew out the
+    horizontal scrollbar. A definition list lets every item align and copy
+    on its own.
   -->
   <dl class="mt-4 flex flex-col divide-y divide-line text-xs">
     {#each fields as field (field.label)}
@@ -52,7 +55,7 @@
           {field.value}
         </dd>
         {#if field.mono}
-          <CopyButton text={field.value} label="复制 {field.label}" />
+          <CopyButton text={field.value} label={t('shell.copyField', { label: field.label })} />
         {/if}
       </div>
     {/each}

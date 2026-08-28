@@ -2,66 +2,35 @@
 
 ## 中文
 
-ZARC Studio 是一个基于 **Rust + Tauri + Svelte** 的跨平台高性能压缩工具。
+ZARC Studio 是一款基于 **Rust + Tauri 2 + Svelte 5** 构建的现代化跨平台压缩工具。它将高性能的 **zstd** 压缩引擎与严苛的现代加密标准结合，提供兼具极致速度、高压缩比与数据安全的桌面解压缩体验。
 
-### v0.1.1 最新更新
+### 🌟 核心亮点
 
-- 加强 Windows 文件系统兼容性，支持目录中的 `NUL` 等保留设备名与 verbatim 路径。
-- 升级加密归档格式，记录 Argon2id 参数并增加恶意参数/分块长度校验，同时兼容旧版加密归档。
-- 强化分卷、SFX、事务式解压、输出覆盖保护、符号链接与任务取消等可靠性处理。
-- 重构桌面界面与任务状态管理，完善归档预览、Benchmark、快捷操作和结果展示。
+- **极速与全面**：采用高效的 zstd 算法与 tar 格式打包（支持 `.zst` 与 `.tar.zst`）。不仅支持大文件自动分卷和一键生成 Windows 自解压程序（SFX .exe），还内置了压缩性能基准测试（Benchmark），方便快速挑选最适合当前硬件的压缩等级。
+- **坚如磐石的安全**：拒绝弱加密。密码绝不直接落地，而是通过高强度的 **Argon2id** 算法派生密钥，并由 **XChaCha20-Poly1305** 提供认证加密，同时辅以 **BLAKE3** 高速哈希校验。解压时采用“临时目录事务机制”，如果解压中途出错或发生路径冲突，不会误损坏原有的文件。
+- **流畅的桌面交互**：提供直观的归档文件内容预览，任务进行中支持实时查看速度与吞吐量，并可随时无损取消任务。
 
-### 功能
+### 🚀 v0.1.1 更新要点
 
-- zstd 高性能压缩与解压
-- 文件与目录归档（`.zst` / `.tar.zst`）
-- XChaCha20-Poly1305 加密
-- Argon2id 密码派生
-- 大文件分卷归档
-- Windows 自解压 EXE
-- 压缩等级 Benchmark
-- BLAKE3 哈希校验信息
-- 实时速度、进度和任务取消
+本版本重点提升了底层兼容性与容错能力：
+全面适配了 Windows 下的特殊路径与设备保留名（例如目录中的 `NUL`）；加密归档格式迎来升级，在保持向下兼容的同时加入了 Argon2id 动态参数记录与防恶意篡改校验；进一步强化了分卷归档、自解压生成、符号链接保留与“安全防覆盖”机制，并重构了桌面端的任务状态管理与基准测试交互。
 
-### 技术栈
+### 🛠️ 技术栈与构建
 
-- Backend: Rust
-- Desktop Framework: Tauri 2
-- Frontend: Svelte 5 + TypeScript
-- Compression: zstd
-- Archive: tar
+- **技术栈**：Rust (后端) · Tauri 2 (桌面框架) · Svelte 5 + TypeScript (前端) · zstd & tar (压缩核心)
 
-### 构建
-
-需要安装：
-
-- Node.js 20+
-- Rust stable
-- Tauri 2 依赖环境
+**环境要求**：Node.js 20+、Rust stable 及 Tauri 2 系统依赖。
 
 ```bash
 cd zarc-desktop
 npm install
+
+# 本地开发调试
+npm run tauri dev
+
+# 打包发布版本
 npm run tauri build
 ```
-
-开发运行：
-
-```bash
-npm run tauri dev
-```
-
-### 安全设计
-
-- 密码不会直接作为加密密钥使用
-- 使用 Argon2id 派生密钥
-- 使用 XChaCha20-Poly1305 提供认证加密
-- 解压采用临时目录提交机制，避免失败覆盖用户数据
-- 输出路径冲突会被拒绝
-
-### 项目状态
-
-当前版本重点关注稳定压缩、加密归档和桌面体验。
 
 ---
 
@@ -69,63 +38,32 @@ npm run tauri dev
 
 ## English
 
-ZARC Studio is a cross-platform high-performance compression application built with **Rust + Tauri + Svelte**.
+ZARC Studio is a modern, cross-platform compression tool powered by **Rust, Tauri 2, and Svelte 5**. It pairs the lightning-fast **zstd** engine with state-of-the-art cryptography to deliver blazing speed, high compression ratios, and rock-solid data protection in an intuitive desktop interface.
 
-### v0.1.1 Latest Update
+### 🌟 Key Highlights
 
-- Improved Windows filesystem compatibility, including verbatim paths and reserved names such as `NUL` inside source trees.
-- Upgraded the encrypted archive format to store Argon2id parameters and validate hostile KDF/chunk values while retaining legacy compatibility.
-- Hardened multi-volume archives, SFX handling, transactional extraction, overwrite protection, symlink preservation, and task cancellation.
-- Refined the desktop UI and task state architecture with better archive preview, benchmark workflow, shortcuts, and result presentation.
+- **Fast & Versatile Packaging**: Compress files and folders into `.zst` / `.tar.zst` using modern zstd efficiency. It supports multi-volume archives for large files, one-click Windows self-extracting (SFX) executables, and a built-in benchmark tool to help you easily find the sweet spot between speed and compression ratio.
+- **Battle-Tested Security**: Your master password is never stored or used directly. Keys are derived via memory-hard **Argon2id** and encrypted with **XChaCha20-Poly1305** authenticated encryption, alongside **BLAKE3** integrity hashing. The extraction engine uses safe transactional staging—if an operation fails or runs into a path conflict, your existing files will never be corrupted.
+- **Smooth Desktop Experience**: Features an instant archive content preview, real-time throughput and progress monitoring, and seamless task cancellation without leaving orphan files.
 
-### Features
+### 🚀 What's New in v0.1.1
 
-- High-performance zstd compression and extraction
-- File and directory archives (`.zst` / `.tar.zst`)
-- XChaCha20-Poly1305 authenticated encryption
-- Argon2id password-based key derivation
-- Multi-volume archive support
-- Windows self-extracting executable archives
-- Compression benchmark
-- BLAKE3 hash reporting
-- Real-time progress, throughput and cancellation
+This update focuses on deep reliability and filesystem compatibility:
+Added robust Windows support for verbatim paths and reserved device names (such as `NUL` in source trees); upgraded the encrypted archive structure with tamper-resistant Argon2id parameter validation while retaining backward compatibility; and hardened multi-volume handling, SFX extraction, symlink preservation, and task state management across the UI.
 
-### Tech Stack
+### 🛠️ Tech Stack & Build
 
-- Backend: Rust
-- Desktop Framework: Tauri 2
-- Frontend: Svelte 5 + TypeScript
-- Compression: zstd
-- Archive Format: tar
+- **Stack**: Rust (Backend) · Tauri 2 (Desktop Framework) · Svelte 5 + TypeScript (Frontend) · zstd & tar (Core Engine)
 
-### Build
-
-Requirements:
-
-- Node.js 20+
-- Rust stable
-- Tauri 2 system dependencies
+**Requirements**: Node.js 20+, Rust stable, and Tauri 2 build dependencies.
 
 ```bash
 cd zarc-desktop
 npm install
+
+# Run in development mode
+npm run tauri dev
+
+# Build for release
 npm run tauri build
 ```
-
-Run in development mode:
-
-```bash
-npm run tauri dev
-```
-
-### Security Design
-
-- Passwords are never used directly as encryption keys
-- Keys are derived with Argon2id
-- Encryption uses XChaCha20-Poly1305 authenticated encryption
-- Extraction uses transactional temporary output to protect existing data
-- Unsafe path conflicts are rejected
-
-### Project Status
-
-The current version focuses on reliable compression, encrypted archives and desktop usability.

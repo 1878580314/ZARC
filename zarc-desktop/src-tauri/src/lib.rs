@@ -361,6 +361,9 @@ struct EmbeddedArchiveInfo {
     default_extract_name: String,
     encrypted: bool,
     archive_kind: String,
+    /// SFX 启动即检测：分卷数据文件应在 EXE 旁且名字未被更改，
+    /// 缺失时前端可以立刻提示，而不是等到点下解压才报错。
+    payload_ready: bool,
 }
 
 #[tauri::command]
@@ -2404,7 +2407,7 @@ fn decompress_reader_transactionally<R: Read>(
     // are not allowed to place it. Re-checked after staging to cover the window
     // in between.
     if output.exists() {
-        bail!("输出路径已存在，为保护数据拒绝覆盖: {}", output.display());
+        bail!("输出路径已存在，请自行更改输出名称: {}", output.display());
     }
 
     let parent = output_parent(output);
@@ -2422,7 +2425,7 @@ fn decompress_reader_transactionally<R: Read>(
     };
 
     if output.exists() {
-        bail!("输出路径已存在，为保护数据拒绝覆盖: {}", output.display());
+        bail!("输出路径已存在，请自行更改输出名称: {}", output.display());
     }
 
     fs::rename(&temp_path, output).with_context(|| {
@@ -2521,7 +2524,7 @@ fn validate_decompress_paths(archive: &Path, output: &Path, _meta: ArchiveMeta) 
         bail!("解压输出不能覆盖归档文件");
     }
     if output.exists() {
-        bail!("输出路径已存在，为保护数据拒绝覆盖: {}", output.display());
+        bail!("输出路径已存在，请自行更改输出名称: {}", output.display());
     }
     Ok(())
 }
@@ -2722,8 +2725,10 @@ fn default_decompress_name(archive: &Path, meta: ArchiveMeta) -> Result<String> 
 
     match meta.kind {
         ArchiveKind::TarZst => {
+            // 默认输出名直接取压缩包原名；重名时由输出保护统一拒绝，
+            // 并提示用户自行更改，而不是自动追加后缀。
             let stem = base.trim_end_matches(".tar.zst");
-            Ok(format!("{stem}_extracted"))
+            Ok(stem.to_string())
         }
         ArchiveKind::Zst => {
             let stem = base.trim_end_matches(".zst");

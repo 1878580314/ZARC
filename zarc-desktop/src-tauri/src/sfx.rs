@@ -389,6 +389,8 @@ fn load_embedded_archive_info_from_path(path: &Path) -> Result<Option<EmbeddedAr
         default_extract_name: manifest.default_extract_name,
         encrypted: manifest.encrypted,
         archive_kind: archive_kind_label(manifest.archive_kind),
+        // 与解压路径的检查保持同一语义：分卷模式要求 sidecar 与 EXE 同目录同名。
+        payload_ready: !manifest.payload_in_sidecar || sidecar_path(path).exists(),
     }))
 }
 
@@ -420,7 +422,7 @@ fn extract_embedded_archive_from_path(
         let sidecar = sidecar_path(host_path);
         if !sidecar.exists() {
             bail!(
-                "找不到数据文件 {}，请确保它与 EXE 放在一起",
+                "找不到数据文件 {}：请将它与本程序放在同一目录，且不要更改其名称",
                 sidecar.display()
             );
         }

@@ -44,7 +44,7 @@
           ? 'bg-accent-wash text-accent'
           : 'text-fg-soft hover:bg-inset hover:text-fg'}"
       >
-        <!-- A slim indicator bar is subtler than a filled block and keeps the icon's own color. -->
+        <!-- 细指示条比方块填充更克制，且保留图标自身颜色。 / A slim indicator bar is subtler than a filled block and keeps the icon's own color. -->
         <span
           class="absolute top-1/2 left-0 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-accent transition-opacity duration-200 {active
             ? 'opacity-100'

@@ -11,6 +11,8 @@ use super::*;
 const SFX_MAGIC: &[u8; 8] = b"ZARCSFX1";
 const SFX_TRAILER_LEN: u64 = 24;
 const SIDECAR_SUFFIX: &str = ".payload";
+/// 超过此载荷大小，SFX 采用外部 sidecar 布局；低于它则把载荷内嵌进 EXE（单文件、更便携）。
+/// Windows PE 加载器拒绝约 2GB 以上的单映像，故 1.9GB 为宿主 EXE + manifest + trailer 留出余量。
 /// Above this payload size, SFX uses the external sidecar layout; below it,
 /// payload is embedded in the exe (single-file, more portable). The Windows PE
 /// loader rejects single images larger than ~2GB, so 1.9GB leaves headroom for
@@ -27,6 +29,8 @@ struct SfxManifest {
     default_extract_name: String,
     source_name: String,
     created_by_version: String,
+    /// 为 true 时载荷位于 `<exe>.payload` sidecar（超 2GB 容量后的布局）；
+    /// 为 false（或旧版 SFX 中缺省）时载荷内嵌在 EXE 自身中。
     /// When true, payload lives in `<exe>.payload` sidecar (post-2GB-capacity layout).
     /// When false (or absent in legacy SFX), payload is embedded in the exe itself.
     #[serde(default)]
@@ -135,6 +139,7 @@ pub(super) fn compress_sfx_archive_sync(
     reporter.finish();
 
     let duration = started.elapsed().as_secs_f64();
+    // sidecar 布局下统计/哈希载荷文件；嵌入式布局下 EXE 自身承载载荷，故统计/哈希 EXE。
     // For the sidecar layout, size/hash the payload file; for embedded, the exe
     // itself carries the payload so size/hash the exe.
     let (result_path, report_sidecar) = match &sidecar {
@@ -196,6 +201,7 @@ fn build_sfx_executable(
     let parent = output_exe.parent().unwrap_or_else(|| Path::new("."));
 
     if payload_length >= SFX_SIDECAR_THRESHOLD {
+        // sidecar 布局：EXE 只是宿主原样副本，载荷放在 .payload 中。
         // Sidecar layout: exe stays a plain host copy, payload lives in .payload.
         let manifest = SfxManifest {
             payload_offset: 0,
@@ -223,6 +229,7 @@ fn build_sfx_executable(
         }
         Ok(Some(sidecar))
     } else {
+        // 嵌入式布局：单文件 [host][payload][manifest][trailer]。
         // Embedded layout: single file [host][payload][manifest][trailer].
         let host_len = fs::metadata(host_exe)
             .with_context(|| format!("无法读取宿主程序信息: {}", host_exe.display()))?
@@ -255,6 +262,8 @@ fn build_sfx_executable(
     }
 }
 
+/// 将宿主 EXE 原样原子拷贝到 `output_exe`。宿主是合法 PE；原样复制可保证无论载荷多大都能加载
+/// （sidecar 承载载荷时不适用约 2GB 的单映像上限）。
 /// Atomically copy the host exe verbatim to `output_exe`. The host is a
 /// legitimate PE; copying it unchanged keeps it loadable regardless of payload
 /// size (the ~2GB single-image cap doesn't apply when payload is in a sidecar).
@@ -351,20 +360,22 @@ fn write_sidecar(
     Ok(())
 }
 
-/// Path of the payload sidecar that accompanies an SFX exe.
+/// 伴随 SFX EXE 的载荷 sidecar 路径。/ Path of the payload sidecar that accompanies an SFX exe.
 pub(super) fn sidecar_path(exe: &Path) -> PathBuf {
     let mut os_string = exe.as_os_str().to_owned();
     os_string.push(SIDECAR_SUFFIX);
     PathBuf::from(os_string)
 }
 
-/// Remove both the SFX exe and its sidecar (best-effort, for failure cleanup).
+/// 尽力删除 SFX EXE 及其 sidecar（失败清理用）。/ Remove both the SFX exe and its sidecar (best-effort, for failure cleanup).
 fn cleanup_sfx_output(exe: &Path) {
     let _ = fs::remove_file(exe);
     let _ = fs::remove_file(sidecar_path(exe));
 }
 
 fn full_error_chain(err: &anyhow::Error) -> String {
+    // anyhow 的备用 Display 用 ": " 连接上下文链，从而保留 OS 层根因
+    // （如 "No space left on device (os error 28)"），而非被顶层上下文信息丢弃。
     // anyhow's alternate Display joins the context chain with ": ", so the OS-level
     // cause (e.g. "No space left on device (os error 28)") is preserved instead of
     // being dropped by the top-level context message.
@@ -390,6 +401,7 @@ fn load_embedded_archive_info_from_path(path: &Path) -> Result<Option<EmbeddedAr
         encrypted: manifest.encrypted,
         archive_kind: archive_kind_label(manifest.archive_kind),
         // 与解压路径的检查保持同一语义：分卷模式要求 sidecar 与 EXE 同目录同名。
+        // Same rule as the decompress-path check: split mode needs the sidecar next to the exe, same name.
         payload_ready: !manifest.payload_in_sidecar || sidecar_path(path).exists(),
     }))
 }
@@ -414,6 +426,8 @@ fn extract_embedded_archive_from_path(
         .with_context(|| "请选择解压目标目录")?;
     fs::create_dir_all(&output_root)
         .with_context(|| format!("无法创建解压目录: {}", output_root.display()))?;
+    // 名称来自归档，即来自构建 SFX 的一方。原样拼接会让 `../../evil` 或 `C:/Windows/x`
+    // 逃出用户选择的目录。
     // The name comes from the archive, i.e. from whoever built the SFX. Joining
     // it raw let `../../evil` or `C:/Windows/x` escape the chosen directory.
     let output = output_root.join(sanitize_extract_name(&manifest.default_extract_name)?);
@@ -445,6 +459,11 @@ fn extract_embedded_archive_from_path(
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, section_reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
+    // 委托给共享的事务性路径：先暂存到临时同级路径，仅在成功后重命名落位。
+    // 旧的内联版本有两个严重缺陷：每个分支都用 `?`，解压中途失败会在到达下方清理代码之前
+    // 就返回——残缺目录树留在磁盘上；且清理一旦执行就无条件删除 `output`，导致失败解压
+    // 摧毁一个从未被写入的同名既有文件或目录。
+    //
     // Delegated to the shared transactional path, which stages into a temp
     // sibling and only renames into place on success.
     //
@@ -498,6 +517,12 @@ fn extract_embedded_archive_from_path(
     })
 }
 
+/// 把归档提供的解压名收敛为单个安全的路径分量。
+///
+/// `default_extract_name` 是从 SFX manifest 读出的攻击者可控数据。`output_root.join(raw)`
+/// 会遵从绝对路径与 `..`，因此精心构造的 SFX 可写到用户能写的任意位置——逃出所选目录之外。
+/// 只保留最后一个分量即可消除这两类逃逸。
+///
 /// Reduce an archive-supplied extraction name to a single, safe path component.
 ///
 /// `default_extract_name` is attacker-controlled data read out of the SFX
@@ -510,6 +535,7 @@ fn sanitize_extract_name(raw: &str) -> Result<String> {
         bail!("自解压包内的输出名称为空，无法解压");
     }
 
+    // 无论宿主 OS 如何，两种分隔符都被拒绝：Windows 构建的 SFX 在 Linux 上打开时不得越界，反之亦然。
     // Both separators are rejected regardless of host OS: a Windows-built SFX
     // must not be able to traverse when opened on Linux, and vice versa.
     let last = trimmed
@@ -531,10 +557,12 @@ fn sanitize_extract_name(raw: &str) -> Result<String> {
 fn read_embedded_manifest(exe_path: &Path) -> Result<Option<SfxManifest>> {
     let sidecar = sidecar_path(exe_path);
     if sidecar.exists() {
+        // sidecar 存在：任何损坏都是硬错误（不要静默回退到普通 ZARC 模式——用户显然想要 SFX）。
         // Sidecar present: any corruption is a hard error (don't silently fall back
         // to plain ZARC mode — the user clearly intended an SFX here).
         return read_manifest_from_file(&sidecar, true);
     }
+    // 无 sidecar：尝试旧版嵌入式布局（trailer 在 EXE 末尾）；没有 trailer 说明这只是普通 ZARC EXE。
     // No sidecar: try legacy embedded layout (trailer at exe end); absent trailer
     // means this is just a normal ZARC exe.
     read_manifest_from_file(exe_path, false)
@@ -612,6 +640,7 @@ fn archive_kind_label(kind: ArchiveKind) -> String {
 mod tests {
     use super::*;
 
+    /// 通过生产路径从小源构建 SFX。返回 EXE 路径；小载荷采用嵌入式（单文件）布局。
     /// Build an SFX from a small source via the production path. Returns the exe
     /// path; small payloads take the embedded (single-file) layout.
     fn build_small_sfx(temp: &Path, source_name: &str, archive_name: &str, password: Option<&str>) -> PathBuf {
@@ -632,6 +661,7 @@ mod tests {
         output
     }
 
+    /// 无论载荷多大都强制 sidecar 布局：直接调用 sidecar 构建辅助函数（绕过阈值检查）。
     /// Force the sidecar layout regardless of payload size, by calling the
     /// sidecar build helpers directly (bypassing the threshold check).
     fn force_sidecar_sfx(temp: &Path, content: &[u8], password: Option<&str>) -> PathBuf {
@@ -731,6 +761,7 @@ mod tests {
 
     #[test]
     fn embedded_layout_reads_manifest_from_exe_end() {
+        // 小载荷 -> 嵌入式布局 -> manifest 位于 EXE 末尾，无 sidecar。
         // Small payload -> embedded layout -> manifest lives at exe end, no sidecar.
         let temp = tempfile::tempdir().expect("tempdir");
         let output = build_small_sfx(temp.path(), "plain.txt", "plain.zst", None);
@@ -738,6 +769,7 @@ mod tests {
             .expect("read")
             .expect("manifest present");
         assert!(!manifest.payload_in_sidecar);
+        // payload_offset 即宿主 EXE 的大小；载荷紧随其后位于 EXE 内部。
         // payload_offset is the host exe size; payload follows it inside the exe.
         let host_len = fs::metadata(temp.path().join("template.exe")).unwrap().len();
         assert_eq!(manifest.payload_offset, host_len);
@@ -787,7 +819,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let exe = temp.path().join("plain.exe");
         fs::write(&exe, b"MZfake-host-without-trailer").expect("write exe");
-        // no sidecar, exe has no trailer -> normal ZARC mode
+        // 无侧车且 EXE 无尾标：普通 ZARC 模式 / No sidecar or EXE trailer: normal ZARC mode.
         assert!(read_embedded_manifest(&exe).expect("ok").is_none());
     }
 
@@ -796,7 +828,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let exe = temp.path().join("plain.exe");
         fs::write(&exe, b"MZfake-host").expect("write exe");
-        // sidecar present but too short to hold a trailer
+        // 侧车存在但容不下尾标 / Sidecar exists but is too short for a trailer.
         fs::write(sidecar_path(&exe), b"short").expect("write corrupt sidecar");
         let err = read_embedded_manifest(&exe).expect_err("corrupt sidecar should error");
         assert!(err.to_string().contains("已损坏"), "got: {err}");
@@ -806,7 +838,7 @@ mod tests {
     fn extract_missing_sidecar_errors() {
         let temp = tempfile::tempdir().expect("tempdir");
         let output = force_sidecar_sfx(temp.path(), b"sidecar payload data", None);
-        // remove the sidecar -> SFX can no longer be read
+        // 删除侧车后 SFX 不再可读 / Removing the sidecar makes the SFX unreadable.
         fs::remove_file(sidecar_path(&output)).expect("remove sidecar");
 
         let dest = temp.path().join("out");
@@ -831,7 +863,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let output = force_sidecar_sfx(temp.path(), b"renamed pair", None);
 
-        // rename both files as a pair
+        // 成对重命名两个文件 / Rename both files as a pair.
         let new_exe = temp.path().join("renamed.exe");
         fs::rename(&output, &new_exe).expect("rename exe");
         fs::rename(sidecar_path(&output), sidecar_path(&new_exe))
@@ -862,8 +894,8 @@ mod tests {
             sanitize_extract_name("C:\\Windows\\System32\\evil.dll").unwrap(),
             "evil.dll"
         );
-        // Backslashes are rejected on Linux too: an SFX built on Windows must not
-        // be able to traverse when it is opened elsewhere.
+        // Linux 也拒绝反斜杠，避免 Windows 构建的 SFX 跨平台越界。
+        // Reject backslashes on Linux too, preventing traversal by Windows-built SFX files.
         assert_eq!(sanitize_extract_name("a\\b\\c").unwrap(), "c");
         assert_eq!(sanitize_extract_name("dir/").unwrap(), "dir");
 
@@ -886,8 +918,8 @@ mod tests {
         compress_file(&source, &archive, 8, None, &reporter, None, None, Some(1))
             .expect("compress");
 
-        // Hand-build an SFX whose manifest asks to be written outside the
-        // directory the user picked.
+        // 手工构建 manifest 指向用户目录之外的 SFX。
+        // Build an SFX whose manifest targets outside the selected directory.
         let template = temp.path().join("template.exe");
         fs::write(&template, b"MZfake-host").expect("write template");
         let output = temp.path().join("evil.sfx.exe");
@@ -944,8 +976,8 @@ mod tests {
 
         let dest_root = temp.path().join("dest");
         fs::create_dir_all(&dest_root).expect("create dest");
-        // A pre-existing, unrelated file with the name the SFX wants to use.
-        // The old cleanup path deleted it on failure.
+        // 预先存在的同名无关文件；旧清理路径会在失败时删除它。
+        // Pre-existing unrelated file with the target name; the old failure cleanup deleted it.
         let victim = dest_root.join("plain");
         fs::write(&victim, b"unrelated user data").expect("write victim");
 
@@ -995,7 +1027,7 @@ mod tests {
         )
         .expect("compress dir");
 
-        // Truncate the payload so tar extraction dies partway through.
+        // 截断负载，使 tar 解压中途失败 / Truncate the payload so tar extraction fails midway.
         let raw = fs::read(&archive).expect("read archive");
         let truncated = temp.path().join("tree.trunc.tar.zst");
         fs::write(&truncated, &raw[..raw.len() / 2]).expect("write truncated");

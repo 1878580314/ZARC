@@ -21,7 +21,7 @@
   };
 </script>
 
-<!-- The status bar shows a single line and gets overwritten by the next update; toasts keep concurrent feedback on screen. -->
+<!-- 状态栏单行显示且会被下一条更新覆盖；toast 让并发反馈留在屏幕上。 / The status bar shows a single line and gets overwritten by the next update; toasts keep concurrent feedback on screen. -->
 <div
   class="pointer-events-none fixed right-4 bottom-4 z-[200] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2"
   aria-live="polite"

@@ -25,6 +25,7 @@
   let running = $derived(task.activeKind);
 
   /**
+   * 把状态蒸馏成一个词，折叠卡片一眼可读。基准测试没有进度槽，只有「运行/空闲」两态。
    * Distill the state into a single word so the collapsed card reads at a glance.
    * Benchmark has no progress slot, only the "running / idle" pair.
    */
@@ -36,13 +37,13 @@
     return { text: t('shell.pending'), tone: 'text-fg-faint' };
   }
 
-  /** Collapsed cards keep only the header row; expanded while running or holding a final result. */
+  /** 折叠卡片只留标题行；运行中或持有最终结果时展开。 / Collapsed cards keep only the header row; expanded while running or holding a final result. */
   function expanded(slot: Slot): boolean {
     return running === slot.kind || Boolean(slot.progress?.visible);
   }
 </script>
 
-<!-- Hidden when the window is too narrow; TaskStrip takes over at the top of the main column. -->
+<!-- 窗口过窄时隐藏；TaskStrip 接管主列顶部。 / Hidden when the window is too narrow; TaskStrip takes over at the top of the main column. -->
 <aside class="hidden h-full w-[18rem] shrink-0 flex-col gap-3 py-4 pr-4 pl-1 min-[1180px]:flex">
   <div class="flex items-center justify-between px-2">
     <h2 class="text-[0.68rem] font-bold tracking-[0.12em] text-fg-faint uppercase">{t('shell.taskHub')}</h2>

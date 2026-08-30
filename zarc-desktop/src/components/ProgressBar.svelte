@@ -6,7 +6,7 @@
 
   interface Props {
     progress: TaskProgress;
-    /** Description shown while running; falls back to the task label recorded in the store when empty. */
+    /** 运行中的描述；为空时回退到 store 里记录的任务标签。 / Description shown while running; falls back to the task label recorded in the store when empty. */
     label?: string;
     compact?: boolean;
   }
@@ -21,6 +21,7 @@
   let etaText = $derived(progress.etaSeconds === null ? '—' : formatSeconds(progress.etaSeconds));
 
   /**
+   * 首个进度事件到达前 totalBytes 仍为 0；显示往返的不定进度条，而不是卡在 0% 的死条。
    * totalBytes is still 0 until the first progress event arrives from the
    * backend. Show an indeterminate back-and-forth bar rather than a dead
    * bar stuck at 0%.

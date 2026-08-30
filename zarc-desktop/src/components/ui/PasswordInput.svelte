@@ -7,7 +7,7 @@
     value: string;
     placeholder?: string;
     disabled?: boolean;
-    /** Whether to show the strength bar; when extracting, the password already exists, so rating its strength is pointless. */
+    /** 是否显示强度条；解压时密码已存在，评强度没有意义。 / Whether to show the strength bar; when extracting, the password already exists, so rating its strength is pointless. */
     showStrength?: boolean;
     id?: string;
   }

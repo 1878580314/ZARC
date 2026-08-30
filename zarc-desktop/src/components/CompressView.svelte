@@ -23,7 +23,7 @@
   let output = $state('');
   let outputKind = $state<OutputKind>('archive');
   let splitSize = $state(0);
-  /** 0 lets the backend decide based on the core count. */
+  /** 0 表示由后端按核心数决定。 / 0 lets the backend decide based on the core count. */
   let threads = $state(0);
   let includeRootDir = $state(true);
   let encrypt = $state(false);
@@ -34,12 +34,15 @@
   let report = $state<OperationReport | null>(null);
   let touched = $state(false);
 
+  // 应用 store 持有数据源的唯一副本。旧实现在此保留本地状态并用 $effect 单向同步，
+  // 文件对话框选择的路径从不写回 store，而拖拽却会覆盖它们。
   // The app store holds the only copy of the data source. The old implementation
   // kept a local state here and synced it one-way with $effect, so paths chosen
   // in file dialogs never wrote back to the store while drag-and-drop overwrote them.
   let source = $derived(app.compressSource);
   let kind = $derived(app.compressKind);
   let info = $derived(app.compressInfo);
+  // 压缩等级也存于 store，基准视图的「使用推荐等级」可直接落到这里。
   // The level also lives in the store so the benchmark view's "Use recommended
   // level" can land here directly.
   let level = $derived(app.compressLevel);
@@ -87,12 +90,12 @@
           : t('compress.levelHint.extreme')
   );
 
-  // A self-extracting archive must be a single file, so splitting makes no sense here.
+  // 自解压归档必须是单文件，此处分卷无意义。 / A self-extracting archive must be a single file, so splitting makes no sense here.
   $effect(() => {
     if (isSfx) splitSize = 0;
   });
 
-  // Let Ctrl+Enter trigger this primary action on the Compress view.
+  // 让 Ctrl+Enter 在压缩视图触发此主操作。 / Let Ctrl+Enter trigger this primary action on the Compress view.
   $effect(() => registerPrimaryAction('compress', submit));
 
   async function pickFile(): Promise<void> {

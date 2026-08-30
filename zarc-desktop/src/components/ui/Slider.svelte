@@ -5,7 +5,7 @@
     max: number;
     step?: number;
     disabled?: boolean;
-    /** Tick marks, e.g. `[{ at: 3, label: 'Fast' }]`. */
+    /** 刻度标记，如 `[{ at: 3, label: 'Fast' }]`。 / Tick marks, e.g. `[{ at: 3, label: 'Fast' }]`. */
     marks?: { at: number; label: string }[];
     ariaLabel?: string;
     id?: string;
@@ -22,7 +22,7 @@
     id
   }: Props = $props();
 
-  // Fill percentage. The old implementation was a plain gray track, so you couldn't tell where the position sits within the range.
+  // 填充百分比。旧实现是纯灰轨道，看不出位置在区间内的落点。 / Fill percentage. The old implementation was a plain gray track, so you couldn't tell where the position sits within the range.
   let fill = $derived(((value - min) / (max - min)) * 100);
 </script>
 
@@ -71,7 +71,7 @@
     opacity: 0.5;
   }
 
-  /* Track: the filled portion uses the accent color, the rest uses the inset color. */
+  /* 轨道：已填充部分用主题色，其余用内嵌色。 / Track: the filled portion uses the accent color, the rest uses the inset color. */
   .zarc-range::-webkit-slider-runnable-track {
     height: 0.375rem;
     border-radius: var(--radius-pill);

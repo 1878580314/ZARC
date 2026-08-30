@@ -1,13 +1,16 @@
 <script lang="ts" module>
   /**
+   * 内联 SVG 图标集（Lucide 风格，24×24 线条）。
    * Inline SVG icon set (Lucide style, 24×24 strokes).
    *
+   * 整个 UI 此前用 emoji 作图标：字形随系统而异、无法着色、垂直对齐总差半像素。
+   * 换成线条路径后颜色跟随 `currentColor`，线宽统一。
    * The whole UI previously used emoji as icons: glyphs varied with the system,
    * couldn't be tinted, and vertical alignment was always off by half a pixel.
    * With stroke paths, colors follow `currentColor` and stroke width is uniform.
    */
   export const ICONS = {
-    // Navigation & actions
+    // 导航与操作 / Navigation & actions
     compress:
       'M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8Z|M3.3 7 12 12l8.7-5|M12 22V12',
     decompress:
@@ -24,11 +27,11 @@
       'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z',
     dropIn: 'M12 3v12|m7 10 5 5 5-5|M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4',
 
-    // Theme
+    // 主题 / Theme
     sun: 'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z|M12 2v2|M12 20v2|m4.9 4.9 1.4 1.4|m17.7 17.7 1.4 1.4|M2 12h2|M20 12h2|m6.3 17.7-1.4 1.4|m19.1 4.9-1.4 1.4',
     moon: 'M20.4 14.9A8.5 8.5 0 0 1 9.1 3.6a8.5 8.5 0 1 0 11.3 11.3Z',
 
-    // Status
+    // 状态 / Status
     check: 'M20 6 9 17l-5-5',
     checkCircle: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z|m8.5 12 2.5 2.5 4.5-5',
     close: 'M18 6 6 18|m6 6 12 12',
@@ -36,7 +39,7 @@
     warn: 'M10.3 3.6 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3l-8.5-14.4a2 2 0 0 0-3.4 0Z|M12 9v4|M12 17h.01',
     error: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z|M12 7.5V13|M12 16.5h.01',
 
-    // Forms
+    // 表单 / Forms
     eye: 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z|M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z',
     eyeOff:
       'M9.9 9.9a3 3 0 0 0 4.2 4.2|M10.7 5.1A10.5 10.5 0 0 1 12 5c6.4 0 10 7 10 7a13.4 13.4 0 0 1-2.2 3.1|M6.6 6.6A13.6 13.6 0 0 0 2 12s3.6 7 10 7a9.8 9.8 0 0 0 4.6-1.1|m2 2 20 20',
@@ -50,7 +53,7 @@
     chevronRight: 'm9 18 6-6-6-6',
     chevronLeft: 'm15 18-6-6 6-6',
 
-    // File types
+    // 文件类型 / File types
     file: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z|M14 2v6h6',
     text: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z|M14 2v6h6|M9 13h6|M9 17h6',
     code: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z|M14 2v6h6|m10 12-2 2 2 2|m14 12 2 2-2 2',
@@ -67,7 +70,7 @@
 <script lang="ts">
   interface Props {
     name: IconName;
-    /** Pixel size; just match the line height of adjacent text. */
+    /** 像素尺寸；与相邻文本行高对齐即可。 / Pixel size; just match the line height of adjacent text. */
     size?: number;
     stroke?: number;
     class?: string;

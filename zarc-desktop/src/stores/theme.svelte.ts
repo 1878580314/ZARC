@@ -4,7 +4,7 @@ const STORAGE_KEY = 'theme';
 
 class ThemeStore {
   current = $state<ThemeMode>('dark');
-  /** Follows the system until the user picks a theme manually; from then on it sticks. */
+  /** 跟随系统直至用户手动选择主题；此后固定。 / Follows the system until the user picks a theme manually; from then on it sticks. */
   followSystem = $state(true);
 
   #media: MediaQueryList | null = null;

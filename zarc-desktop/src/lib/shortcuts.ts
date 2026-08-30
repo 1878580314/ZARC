@@ -4,9 +4,9 @@ import { task } from '../stores/task.svelte';
 import { theme } from '../stores/theme.svelte';
 
 export interface ShortcutHint {
-  /** Key sequence, rendered one item per <kbd>. */
+  /** 按键序列，每个 <kbd> 渲染一项。 / Key sequence, rendered one item per <kbd>. */
   keys: string[];
-  /** i18n dictionary key; resolved via t() at render time so entries follow locale switches. */
+  /** i18n 词典键；渲染时经 t() 解析，因此条目会随语言切换。 / i18n dictionary key; resolved via t() at render time so entries follow locale switches. */
   descriptionKey: string;
 }
 
@@ -24,7 +24,7 @@ const VIEW_BY_DIGIT: Record<string, ViewId> = {
   '3': 'benchmark'
 };
 
-/** Each view registers its primary action, invoked on Ctrl+Enter. */
+/** 每个视图注册其主操作，通过 Ctrl+Enter 触发。 / Each view registers its primary action, invoked on Ctrl+Enter. */
 const primaryActions = new Map<ViewId, () => void>();
 
 export function registerPrimaryAction(view: ViewId, action: () => void): () => void {
@@ -45,6 +45,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 export function initShortcuts(): () => void {
   function onKeydown(event: KeyboardEvent): void {
+    // Esc 即使在文本框内也必须生效——那正是最需要它的时候。
     // Esc must work even inside text fields — that is when it is needed most.
     if (event.key === 'Escape') {
       if (app.shortcutsOpen) {
@@ -61,6 +62,7 @@ export function initShortcuts(): () => void {
     if (!mod) return;
 
     if (event.key === 'Enter') {
+      // 在文本框内提交是常见的表单惯例。
       // Submitting from inside a text field is the usual form convention.
       const action = primaryActions.get(app.currentView);
       if (action) {
@@ -70,6 +72,7 @@ export function initShortcuts(): () => void {
       return;
     }
 
+    // 在文本框内不拦截其他组合键，以保留 Ctrl+A/C/V。
     // Don't intercept other combos inside text fields, to keep Ctrl+A/C/V intact.
     if (isTypingTarget(event.target)) return;
 

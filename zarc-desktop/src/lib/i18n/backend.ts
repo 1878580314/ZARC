@@ -1,12 +1,20 @@
 /**
+ * 翻译由 Rust 后端产生的字符串。
  * Translation for strings produced by the Rust backend.
  *
+ * 后端的错误与日志消息在源码中即以中文编写（位于 lib.rs / sfx.rs），
+ * 因此前端把这组已知且有界的消息映射到当前界面语言，而不是在 Rust 里
+ * 复制消息目录。无法识别的部分原样透传，因此新增或链式消息能优雅降级。
  * Backend error and log messages are authored in Chinese at the source
  * (they live in `lib.rs` / `sfx.rs`), so the frontend maps the known,
  * bounded set to the active UI language instead of duplicating message
  * catalogs in Rust. Anything unrecognized is passed through untouched,
  * so new or chained messages degrade gracefully.
  *
+ * 两种规则形态：
+ *  - `{ p, en }`：中文前缀 `p` 映射为英文文本 `en`；输入剩余部分继续扫描，
+ *    因此被包裹的错误链可逐段翻译。
+ *  - `{ r, en }`：粘性正则；`en` 中的 `{1}..{n}` 由捕获组填充，匹配后继续扫描。
  * Two rule shapes:
  *  - `{ p, en }`: the Chinese prefix `p` maps to English text `en`; the
  *    remainder of the input keeps being scanned, so wrapped error chains
@@ -114,6 +122,8 @@ const REGEX_RULES: RegexRule[] = [
 const hasChinese = /[\u4e00-\u9fff]/;
 
 /**
+ * 将后端生成的字符串翻译为当前界面语言。匹配已知规则的
+ * 中文片段被替换；其余内容（路径、数字、未知链）原样通过。
  * Translate a backend-produced string into the active UI language.
  * Chinese segments that match a known rule are replaced; everything
  * else (paths, numbers, unknown chains) passes through unchanged.

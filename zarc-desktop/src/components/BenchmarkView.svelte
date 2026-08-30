@@ -24,7 +24,7 @@
   let report = $state<BenchmarkReport | null>(null);
   let touched = $state(false);
 
-  // Like the Compress view, the store is the single source of truth for the source path.
+  // 与压缩视图一致，store 是源路径的唯一真源。 / Like the Compress view, the store is the single source of truth for the source path.
   let source = $derived(app.benchmarkSource);
   let kind = $derived(app.benchmarkKind);
 
@@ -36,7 +36,7 @@
 
   let estimatedRuns = $derived(Math.max(0, maxLevel - minLevel + 1) * iterations);
 
-  // Extremes of score, throughput, and size, used to normalize the bars.
+  // 得分/吞吐/大小的极值，用于归一化条形图。 / Extremes of score, throughput, and size, used to normalize the bars.
   let bestThroughput = $derived(
     report && report.results.length > 0
       ? Math.max(...report.results.map((r) => r.meanThroughputMiBs))
@@ -94,7 +94,7 @@
     }
   }
 
-  /** Size bars: shorter is better, so they are scaled against the worst value - visually, shorter means better. */
+  /** 大小条形：越短越好，故按最差值缩放。 / Size bars: shorter is better, so they are scaled against the worst value - visually, shorter means better. */
   function ratioWidth(value: number): number {
     if (worstRatio <= 0) return 6;
     return Math.max((value / worstRatio) * 100, 6);
@@ -179,7 +179,7 @@
   </Card>
 
   {#if report}
-    <!-- Snippets are independent closures, so the `{#if report}` narrowing can't reach
+    <!-- Snippet 是独立闭包，`{#if report}` 的类型收窄无法传入；先固定为局部引用。 / Snippets are independent closures, so the `{#if report}` narrowing can't reach
          inside; pin a local reference first. -->
     {@const rep = report}
     <Card title={t('benchmark.resultsCard.title')} subtitle={pathBaseName(rep.sourcePath)} icon="checkCircle">

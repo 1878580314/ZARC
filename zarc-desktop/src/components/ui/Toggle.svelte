@@ -7,7 +7,7 @@
     description?: string;
     icon?: IconName;
     disabled?: boolean;
-    /** Set to true when enabling it carries risk (e.g. "Delete sources when done"). */
+    /** 当开启有风险时置 true（如「完成后删除源文件」）。 / Set to true when enabling it carries risk (e.g. "Delete sources when done"). */
     danger?: boolean;
     onChange?: (checked: boolean) => void;
   }

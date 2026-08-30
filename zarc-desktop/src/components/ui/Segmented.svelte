@@ -1,7 +1,7 @@
 <script lang="ts" module>
   import type { IconName } from './Icon.svelte';
 
-  // The type must live on the module script: instance scripts with generics cannot export.
+  // 类型必须放在 module script：带泛型的实例脚本无法导出。 / The type must live on the module script: instance scripts with generics cannot export.
   export interface SegmentOption<V extends string> {
     value: V;
     label: string;
@@ -17,13 +17,15 @@
     value: T;
     options: SegmentOption<T>[];
     disabled?: boolean;
-    /** Accessible name; screen readers use it to describe what this button group is for. */
+    /** 无障碍名称；屏幕阅读器用它描述按钮组的用途。 / Accessible name; screen readers use it to describe what this button group is for. */
     ariaLabel?: string;
   }
 
   let { value = $bindable(), options, disabled = false, ariaLabel }: Props = $props();
 
   /**
+   * 两三个互斥选项时分段控件优于原生 `<select>`：所有选项一目了然、单击即切换，
+   * 且没有与应用外观冲突的系统下拉弹层。
    * For two or three exclusive options a segmented control beats a native
    * `<select>`: every option is visible at a glance, one click switches, and
    * there's no system dropdown popup that clashes with the app's look.
@@ -35,7 +37,7 @@
   }
 </script>
 
-<!-- Focus lands on the selected radio (roving tabindex); the container itself stays out of the tab order. -->
+<!-- 焦点落在选中的单选项上（roving tabindex）；容器本身不进入 Tab 序。 / Focus lands on the selected radio (roving tabindex); the container itself stays out of the tab order. -->
 <div
   role="radiogroup"
   tabindex={-1}

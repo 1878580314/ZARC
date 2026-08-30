@@ -6,7 +6,7 @@ import { toasts } from './toast.svelte';
 import { normalizeError } from '../lib/format';
 import { t } from '../lib/i18n/index.svelte';
 
-/** Throw this to skip the default error toast (the caller has already surfaced the message). */
+/** 抛出以跳过默认错误 toast（调用方已自行展示消息）。 / Throw this to skip the default error toast (the caller has already surfaced the message). */
 export class SilentTaskError extends Error {}
 
 class TaskStore {
@@ -14,7 +14,7 @@ class TaskStore {
   activeKind = $state<ProgressKind | null>(null);
   aborting = $state(false);
 
-  /** User-initiated abort: not an error, so the messaging should sound different. */
+  /** 用户主动中止：不算错误，措辞应有所不同。 / User-initiated abort: not an error, so the messaging should sound different. */
   #abortRequested = false;
 
   async run(kind: ProgressKind, statusText: string, fn: () => Promise<void>): Promise<boolean> {
@@ -52,6 +52,7 @@ class TaskStore {
       this.activeKind = null;
       this.aborting = false;
       this.#abortRequested = false;
+      // 基准测试没有进度槽；压缩/解压保留最终状态卡片，直到下一个任务开始或用户关闭。
       // Benchmark has no progress slot; compress/extract keep their final-state card
       // until the next task starts or the user dismisses it.
       if (kind === 'benchmark') {

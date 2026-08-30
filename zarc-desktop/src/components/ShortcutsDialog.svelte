@@ -11,7 +11,7 @@
     app.shortcutsOpen = false;
   }
 
-  // Hand focus to the panel when it opens, so Esc and Tab have somewhere to land.
+  // 面板打开时把焦点交给它，Esc 和 Tab 才有着落。 / Hand focus to the panel when it opens, so Esc and Tab have somewhere to land.
   $effect(() => {
     if (app.shortcutsOpen) panel?.focus();
   });
@@ -22,7 +22,7 @@
     class="fixed inset-0 z-[300] flex items-center justify-center p-6"
     transition:fade={{ duration: 140 }}
   >
-    <!-- The backdrop is a real button, so click-to-close comes with keyboard accessibility for free. -->
+    <!-- 背景是真实按钮，点击关闭因此免费获得键盘可达性。 / The backdrop is a real button, so click-to-close comes with keyboard accessibility for free. -->
     <button
       type="button"
       aria-label={t('shell.shortcuts.closeBackdrop')}

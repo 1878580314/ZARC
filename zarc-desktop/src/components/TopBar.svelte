@@ -49,7 +49,7 @@
       <span class="truncate" title={status.message}>{status.message}</span>
     </div>
 
-    <!-- Language toggle lives next to the theme toggle so the corner stays one control row. -->
+    <!-- 语言切换与主题切换同处一行，角落保持单一控制行。 / Language toggle lives next to the theme toggle so the corner stays one control row. -->
     <button
       type="button"
       onclick={toggleLocale}
@@ -60,7 +60,7 @@
       {currentLocale() === 'zh' ? 'EN' : '中文'}
     </button>
 
-    <!-- SFX mode has no sidebar, so the theme toggle needs an entry point here too. -->
+    <!-- SFX 模式没有侧边栏，主题切换也需要此处的入口。 / SFX mode has no sidebar, so the theme toggle needs an entry point here too. -->
     {#if app.isSfx}
       <button
         type="button"

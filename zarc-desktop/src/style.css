@@ -9,10 +9,12 @@
 @import "@fontsource/noto-sans-sc/500.css";
 @import "@fontsource/noto-sans-sc/700.css";
 
-/* The dark variant follows the data-theme attribute written by the anti-flicker script in index.html. */
+/* 深色变体跟随 index.html 中防闪烁脚本写入的 data-theme 属性。 / The dark variant follows the data-theme attribute written by the anti-flicker script in index.html. */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* ───────────────────────────────────────────────────────────────
+   运行时调色板。:root 为浅色；[data-theme="dark"] 覆盖之。
+   这些是原始变量；下面的 @theme inline 块将它们暴露为工具类。
    Runtime palette. :root is light; [data-theme="dark"] overrides it.
    These are the raw variables; the @theme inline block below exposes
    them as utility classes.
@@ -33,7 +35,7 @@
 
   --zarc-line: oklch(0.45 0.02 250 / 0.13);
   --zarc-line-strong: oklch(0.45 0.02 250 / 0.22);
-  /* Highlight along the top edge of glass panels, giving them a sense of real thickness. */
+  /* 玻璃面板顶部边缘的高光，赋予真实的厚度感。 / Highlight along the top edge of glass panels, giving them a sense of real thickness. */
   --zarc-rim: oklch(1 0 0 / 0.85);
 
   --zarc-fg: oklch(0.24 0.022 258);
@@ -97,6 +99,12 @@
 }
 
 /* ───────────────────────────────────────────────────────────────
+   将运行时变量注册为 Tailwind 工具类。
+
+   `inline` 是必须的：否则 Tailwind 会把值烘焙进 :root 上的 `--color-*`
+   条目，深浅色切换随即失效。也切勿使用 `--text-*` 命名空间——那代表
+   字号而非颜色；旧的 `text-primary/secondary/muted` 工具类生成空内容，
+   正是因为这一点。
    Register the runtime variables as Tailwind utility classes.
 
    `inline` is required: otherwise Tailwind bakes the values into the
@@ -222,7 +230,7 @@
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    /* Selecting body text makes no sense in a desktop app; opt back in only where copying is needed. */
+    /* 在桌面应用中选中正文没有意义；仅在确实需要复制的地方恢复选中。 / Selecting body text makes no sense in a desktop app; opt back in only where copying is needed. */
     user-select: none;
     cursor: default;
   }
@@ -261,7 +269,7 @@
     color: var(--zarc-accent-fg);
   }
 
-  /* Unified focus ring: the baseline for keyboard accessibility; not triggered by mouse clicks. */
+  /* 统一焦点环：键盘可访问性的基线；鼠标点击不会触发。 / Unified focus ring: the baseline for keyboard accessibility; not triggered by mouse clicks. */
   :focus-visible {
     outline: 2px solid var(--zarc-accent);
     outline-offset: 2px;
@@ -283,7 +291,7 @@
     box-shadow: var(--zarc-shadow-soft);
   }
 
-  /* Background aurora: a few blurred blobs that set the overall mood. */
+  /* 背景极光：几个模糊光斑奠定整体氛围。 / Background aurora: a few blurred blobs that set the overall mood. */
   .aurora {
     position: fixed;
     border-radius: 50%;
@@ -293,7 +301,7 @@
     will-change: transform;
   }
 
-  /* Shared look for input controls; avoids repeating long utility strings in a dozen places. */
+  /* 输入控件的统一外观；避免在十几处重复冗长的工具类字符串。 / Shared look for input controls; avoids repeating long utility strings in a dozen places. */
   .control {
     width: 100%;
     border-radius: var(--radius-control);
@@ -327,7 +335,7 @@
     border-color: var(--zarc-danger);
   }
 
-  /* Uniform font size and weight for form labels, keeping title rows in a column of controls strictly aligned. */
+  /* 表单标签统一的字号与字重，让控件列中的标题行严格对齐。 / Uniform font size and weight for form labels, keeping title rows in a column of controls strictly aligned. */
   .field-label {
     font-size: 0.75rem;
     line-height: 1rem;
@@ -343,7 +351,7 @@
 }
 
 @layer utilities {
-  /* Flowing highlight on progress bars. */
+  /* 进度条上的流动高光。 / Flowing highlight on progress bars. */
   .sheen::after {
     content: "";
     position: absolute;
@@ -353,7 +361,7 @@
   }
 }
 
-/* Honor the system "prefers-reduced-motion" setting: turn off decorative animations, keep status feedback. */
+/* 遵循系统的 "prefers-reduced-motion" 设置：关闭装饰动画，保留状态反馈。 / Honor the system "prefers-reduced-motion" setting: turn off decorative animations, keep status feedback. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

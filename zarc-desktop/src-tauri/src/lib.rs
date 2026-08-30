@@ -23,31 +23,31 @@ const MIB: f64 = 1024.0 * 1024.0;
 const PROGRESS_EVENT: &str = "zarc://progress";
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
 
-/// Legacy header: KDF parameters were implicit (see `LEGACY_KDF`). Still read for
-/// backward compatibility, never written.
+/// 旧版头：KDF 参数未记录（见 `LEGACY_KDF`），仅为兼容保留读取，不再写出
+/// Legacy header: KDF params implicit (see `LEGACY_KDF`); read for compat only, never written.
 const ENC_MAGIC_V1: &[u8; 8] = b"ZENC0001";
-/// Current header: KDF parameters are stored explicitly so future tuning cannot
-/// silently turn old archives into "wrong password" errors.
+/// 当前头：显式记录 KDF 参数，避免日后调参让旧归档被误判为密码错误
+/// Current header: KDF params stored explicitly so future tuning cannot turn old archives into "wrong password" errors.
 const ENC_MAGIC_V2: &[u8; 8] = b"ZENC0002";
 const ENC_SALT_LEN: usize = 16;
 const ENC_NONCE_PREFIX_LEN: usize = 16;
 const ENC_KEY_LEN: usize = 32;
 const ENC_CHUNK_SIZE: usize = 256 * 1024;
 const ENC_TAG_LEN: usize = 16;
-/// Hard upper bound for a chunk length read off disk. A hostile/corrupt archive
-/// must not be able to make us allocate an arbitrary buffer.
+/// 从磁盘读到的分块长度硬上限，防止恶意/损坏归档触发任意大的内存分配
+/// Hard upper bound for a chunk length; a hostile/corrupt archive must not force an arbitrary allocation.
 const ENC_MAX_CHUNK_LEN: usize = ENC_CHUNK_SIZE + ENC_TAG_LEN;
 
-/// Argon2id parameters used by `ZENC0001` archives, which did not record them.
+/// 旧归档使用的 Argon2id 参数（旧格式未记录） / Argon2id params used by legacy ZENC0001 archives.
 const LEGACY_KDF: KdfParams = KdfParams {
     m_cost_kib: 32 * 1024,
     t_cost: 2,
     parallelism: 1,
 };
-/// Argon2id parameters written into new archives.
+/// 新归档写入的 Argon2id 参数 / Argon2id params written into new archives.
 const CURRENT_KDF: KdfParams = LEGACY_KDF;
-/// Sanity bounds applied to parameters read from an archive header, so a forged
-/// header cannot trigger a multi-gigabyte Argon2 allocation.
+/// 归档头中 KDF 参数的合理上限，防止伪造头部触发超大 Argon2 内存分配
+/// Sanity bounds for header-read params, so a forged header cannot trigger a multi-gigabyte allocation.
 const KDF_MAX_M_COST_KIB: u32 = 1024 * 1024;
 const KDF_MAX_T_COST: u32 = 64;
 const KDF_MAX_PARALLELISM: u32 = 64;
@@ -94,8 +94,8 @@ impl KdfParams {
     }
 }
 
-/// A derived key that scrubs itself on drop, so it does not linger in freed heap
-/// or stack memory after the cipher has been built.
+/// 派生密钥，Drop 时自擦除，避免明文残留在已释放的堆/栈内存中
+/// A derived key that scrubs itself on drop so it never lingers in freed memory.
 struct SecretKey([u8; ENC_KEY_LEN]);
 
 impl SecretKey {
@@ -104,11 +104,9 @@ impl SecretKey {
     }
 }
 
-/// The normalized password, scrubbed when it goes out of scope.
-///
-/// `Deref<Target = str>` is deliberate: it makes `Option<SecretString>::as_deref()`
-/// work, so every existing `password.as_deref()` call site keeps compiling while
-/// gaining the wipe-on-drop behaviour.
+/// 归一化后的密码，离开作用域即擦除。特意实现 `Deref<str>`，现有 `as_deref()` 调用点无需改动即获得擦除行为
+/// Normalized password wiped on drop. `Deref<Target = str>` is deliberate: existing
+/// `password.as_deref()` call sites keep compiling while gaining the wipe-on-drop behaviour.
 struct SecretString(String);
 
 impl std::ops::Deref for SecretString {
@@ -166,11 +164,11 @@ struct CompressRequest {
     split_size_mib: Option<u64>,
     enable_logging: Option<bool>,
     delete_source_after: Option<bool>,
-    /// zstd worker threads. `None` / out-of-range falls back to every core.
+    /// 线程数；None 或越界回退为全部核心 / zstd worker threads; None/out-of-range uses all cores.
     threads: Option<u32>,
 }
 
-/// Clamp a requested worker count into `1..=cores`, defaulting to all cores.
+/// 将请求的线程数收敛到 1..=cores，默认用满全部核心 / Clamp workers into 1..=cores, defaulting to all cores.
 fn resolve_threads(requested: Option<u32>) -> u32 {
     let cores = num_cpus::get().max(1) as u32;
     requested.unwrap_or(cores).clamp(1, cores)
@@ -205,9 +203,9 @@ impl MultiVolumeWriter {
             current_file: None,
             current_index: 1,
             bytes_written_in_volume: 0,
-            // `saturating_mul`: a nonsense MiB value must degrade into "one huge
-            // volume", never wrap around into a tiny limit that would shred the
-            // archive into millions of files.
+            // saturating_mul：非法的 MiB 值必须退化为“单个超大分卷”，绝不能回绕成碎化归档的小上限
+            // `saturating_mul`: a nonsense MiB value degrades to "one huge volume", never
+            // wraps into a tiny limit that would shred the archive into millions of files.
             volume_limit: volume_limit_mib.saturating_mul(1024 * 1024),
             total_written: 0,
         }
@@ -222,7 +220,7 @@ impl MultiVolumeWriter {
         Ok(self.current_file.as_mut().unwrap())
     }
 
-    /// Close the current volume (durably) and move on to the next index.
+    /// 落盘关闭当前分卷并推进到下一卷 / Close the current volume durably and move to the next index.
     fn rotate_volume(&mut self) -> io::Result<()> {
         if let Some(mut f) = self.current_file.take() {
             f.flush()?;
@@ -268,9 +266,10 @@ impl Write for MultiVolumeWriter {
                 self.rotate_volume()?;
             }
 
-            // Recomputed *after* the rotation. Reading it before meant the first
-            // write into a fresh volume saw `remaining == 0` and fell back to
-            // `.max(1)`, i.e. one byte per syscall for the whole archive.
+            // 必须在分卷切换*之后*重算；若提前读取，新分卷首写会看到 remaining == 0，
+            // 退化为 .max(1)，整个归档变成每系统调用一个字节
+            // Recomputed *after* rotation: reading it earlier made the first write into a
+            // fresh volume see `remaining == 0` and degrade to one byte per syscall.
             let remaining_in_vol = self.volume_limit - self.bytes_written_in_volume;
             let take = ((buf.len() - written) as u64).min(remaining_in_vol) as usize;
 
@@ -303,8 +302,8 @@ struct DecompressRequest {
     password: Option<String>,
 }
 
-/// Upper bound on the files counted by [`inspect_path`]; past this the UI shows
-/// a "≥" estimate instead of freezing on a million-entry tree.
+/// [`inspect_path`] 统计文件数的上限；超过后 UI 显示“≥”估算而不是冻结在百万级目录树上
+/// Upper bound on files counted by [`inspect_path`]; past this the UI shows a "≥" estimate.
 const PATH_INSPECT_ENTRY_CAP: u64 = 200_000;
 
 #[derive(Debug, Serialize)]
@@ -315,7 +314,7 @@ struct PathInfo {
     is_dir: bool,
     size_bytes: u64,
     file_count: u64,
-    /// `true` when the walk hit [`PATH_INSPECT_ENTRY_CAP`] and the totals are lower bounds.
+    /// 遍历达到上限时为 true，此时统计值为下限 / True when the walk hit the cap; totals are lower bounds.
     truncated: bool,
 }
 
@@ -361,8 +360,9 @@ struct EmbeddedArchiveInfo {
     default_extract_name: String,
     encrypted: bool,
     archive_kind: String,
-    /// SFX 启动即检测：分卷数据文件应在 EXE 旁且名字未被更改，
-    /// 缺失时前端可以立刻提示，而不是等到点下解压才报错。
+    /// SFX 启动即检测：分卷数据文件应在 EXE 旁且名字未被更改，缺失时前端可立刻提示
+    /// Checked at SFX startup: the sidecar must sit next to the exe unrenamed, so the
+    /// frontend can warn immediately instead of failing at extraction time.
     payload_ready: bool,
 }
 
@@ -399,8 +399,8 @@ fn list_archive_content_sync(
     }
 
     let archive_bytes = archive_input_bytes(&archive, meta)?;
-    // Two passes over the archive: hash, then decode. Reporting `2 ×` up front
-    // keeps the bar monotonic instead of snapping back to 50% halfway through.
+    // 归档要走两遍：先哈希再解码；总量预先按 2× 上报，进度条才能单调推进，而不是中途回落到 50%
+    // Two passes over the archive: hash, then decode. Reporting `2 ×` up front keeps the bar monotonic.
     let reporter = ProgressReporter::new(app, "decompress", archive_bytes.saturating_mul(2));
     reporter.begin();
 
@@ -424,7 +424,7 @@ fn list_archive_content_inner(
     reporter: &ProgressReporter,
     state: Option<AppState>,
 ) -> Result<ArchiveContentReport> {
-    // Pass 1 — digest every volume, not just `.001`.
+    // 第 1 遍 — 计算所有分卷的摘要，而非仅 .001 / Pass 1 — digest every volume, not just .001.
     let mut hasher = blake3::Hasher::new();
     let mut hash_buf = vec![0_u8; 1024 * 1024];
     for volume in archive_volume_paths(archive, meta)? {
@@ -448,8 +448,8 @@ fn list_archive_content_inner(
     }
     let archive_hash = hasher.finalize().to_hex().to_string();
 
-    // Pass 2 — decode. `ProgressReader` drives the bar; `AbortableReader` makes
-    // the Stop button work, which it previously did not for preview at all.
+    // 第 2 遍 — 解码。ProgressReader 驱动进度条，AbortableReader 让停止按钮生效（此前预览完全无法停止）
+    // Pass 2 — decode. `ProgressReader` drives the bar; `AbortableReader` makes Stop work at all.
     let reader: Box<dyn Read> = if meta.is_multi_volume {
         Box::new(MultiVolumeReader::new(archive.to_path_buf()))
     } else {
@@ -505,10 +505,10 @@ fn read_archive_listing<R: Read>(
             }
         }
         ArchiveKind::Zst => {
-            // A single-file `.zst` carries no name or size in the frame, so the
-            // only honest way to report them is to decode and count. Doing that
-            // also means a wrong password now *fails* here — before, this arm
-            // ignored the password entirely and happily reported `size: 0`.
+            // 单文件 .zst 帧内不含名称与大小，只能解码计数；顺带让错误密码在此直接失败
+            // （此前该分支完全忽略密码，误报 size: 0）
+            // A single-file `.zst` frame carries no name/size, so decode and count; a wrong
+            // password now *fails* here instead of being ignored with `size: 0`.
             let mut decoder = zstd::Decoder::new(reader).context("创建 zstd 解码器失败")?;
             let mut buffer = vec![0_u8; 512 * 1024];
             let mut size = 0_u64;
@@ -633,8 +633,9 @@ impl ProgressReporter {
             state: Arc::new(ProgressState {
                 started: now,
                 processed: AtomicU64::new(0),
-                // Backdate so the first `advance` is not throttled. `checked_sub`
-                // because subtracting from a fresh monotonic clock can underflow.
+                // 回拨时间戳，避免第一次 advance 被节流；checked_sub 防止对新时钟做减法下溢
+                // Backdate so the first `advance` is not throttled; `checked_sub` avoids
+                // underflow against a fresh monotonic clock.
                 last_emit: Mutex::new(now.checked_sub(PROGRESS_EMIT_INTERVAL).unwrap_or(now)),
             }),
         }
@@ -775,10 +776,9 @@ enum OutputSink {
 }
 
 impl OutputSink {
-    /// Flush every layer *and* force the bytes to stable storage. Without the
-    /// final `sync_all` we would report "done" while the archive still lives
-    /// only in the page cache — a power loss then leaves a truncated file that
-    /// looks complete.
+    /// 刷新每一层并强制落盘；缺最后的 sync_all 时会先报“完成”，断电后留下看似完整实则截断的文件
+    /// Flush every layer *and* force bytes to stable storage. Without the final `sync_all`
+    /// we report "done" while data lives only in the page cache.
     fn finalize(self) -> Result<()> {
         match self {
             Self::Plain(mut writer) => {
@@ -834,10 +834,11 @@ struct EncryptedWriter<W: Write> {
     cipher: XChaCha20Poly1305,
     nonce_prefix: [u8; ENC_NONCE_PREFIX_LEN],
     counter: u64,
-    /// Plaintext staging area, reused across chunks. Grows to
-    /// `ENC_CHUNK_SIZE + ENC_TAG_LEN` once and is then encrypted in place.
+    /// 明文暂存缓冲，跨分块复用；一次性增长到 ENC_CHUNK_SIZE + ENC_TAG_LEN 后原地加密
+    /// Plaintext staging area reused across chunks; grows once to
+    /// `ENC_CHUNK_SIZE + ENC_TAG_LEN` and is then encrypted in place.
     buffer: Vec<u8>,
-    /// Bytes of `buffer` that hold pending plaintext.
+    /// 缓冲区中待处理明文的字节数 / Bytes of `buffer` holding pending plaintext.
     pending: usize,
     finished: bool,
 }
@@ -877,6 +878,7 @@ impl<W: Write> EncryptedWriter<W> {
         })
     }
 
+    /// 就地加密 `self.buffer[..self.pending]`（附 AEAD tag）并连长度前缀写出，零逐块堆分配
     /// Encrypt `self.buffer[..self.pending]` in place (appending the AEAD tag)
     /// and emit it with its length prefix. No per-chunk heap allocation.
     fn flush_pending_chunk(&mut self) -> io::Result<()> {
@@ -898,6 +900,7 @@ impl<W: Write> EncryptedWriter<W> {
         Ok(())
     }
 
+    /// 写入结束标记并交还内层 writer，调用方可在报成功前 `fsync`
     /// Write the terminator and hand the inner writer back so the caller can
     /// `fsync` it before reporting success.
     fn finish(mut self) -> io::Result<W> {
@@ -1015,6 +1018,7 @@ impl<R: Read> EncryptedReader<R> {
             return Ok(());
         }
 
+        // 分配前先拒绝离谱长度：写出端从不超过单块+tag，更大即为损坏或伪造
         // Reject implausible lengths *before* allocating: the writer never emits
         // more than one chunk plus its tag, so anything larger is corrupt or forged.
         if !(ENC_TAG_LEN..=ENC_MAX_CHUNK_LEN).contains(&chunk_len) {
@@ -1024,6 +1028,7 @@ impl<R: Read> EncryptedReader<R> {
             ));
         }
 
+        // `decrypted` 兼作密文暂存区：就地解密后长度恰好缩短一个 tag
         // `decrypted` doubles as the ciphertext staging area; decryption happens in
         // place and shrinks it by exactly the tag length.
         self.decrypted.clear();
@@ -1038,6 +1043,7 @@ impl<R: Read> EncryptedReader<R> {
             .decrypt_in_place(XNonce::from_slice(&nonce), &[], &mut self.decrypted)
             .is_err()
         {
+            // 绝不留下可读的未认证字节：忽略错误继续读的调用方必须看到 EOF，而非半解密垃圾
             // Never leave unauthenticated bytes readable: a caller that ignores the
             // error and reads again must see EOF, not partially-decrypted garbage.
             self.decrypted.clear();
@@ -1122,6 +1128,7 @@ fn get_embedded_archive_info() -> std::result::Result<Option<EmbeddedArchiveInfo
     sfx::load_embedded_archive_info_from_current_exe().map_err(|err| err.to_string())
 }
 
+/// 遍历 `root` 累计文件大小；遍历代价过高时提前截断，让 UI 显示估算值而非卡死
 /// Walk `root` and total up file sizes, stopping early once the walk becomes
 /// expensive enough that the UI would rather show an estimate than block.
 fn measure_directory(root: &Path) -> (u64, u64, bool) {
@@ -1146,10 +1153,13 @@ fn measure_directory(root: &Path) -> (u64, u64, bool) {
     (bytes, files, false)
 }
 
+/// 向文件系统查询路径的真实类型。
 /// Ask the filesystem what a path actually is.
 ///
+/// 前端曾用 `basename.includes('.')` 猜测，会把 `release.v2/` 判为文件、`Makefile`
+/// 判为目录，导致错误的 `include_root_dir` 语义。只有 `stat` 能回答这个问题。
 /// The frontend used to guess with `basename.includes('.')`, which labels
-/// `release.v2/` a file and `Makefile` a directory — and then hands the wrong
+/// `release.v2/` a file and `Makefile` a directory - and then hands the wrong
 /// `include_root_dir` semantics to the backend. Only a `stat` can answer this.
 #[tauri::command]
 async fn inspect_path(path: String) -> std::result::Result<PathInfo, String> {
@@ -1230,8 +1240,11 @@ fn abort_task(state: State<'_, AppState>) {
     state.request_abort();
 }
 
+/// 日志落盘句柄，每进程至多打开一次。
 /// Log sink, opened at most once per process.
 ///
+/// 旧实现每写一行就重开 `zarc.log`：每条消息一对系统调用，且应用位于只读目录
+/// （`/Applications`、`Program Files`）时静默失效。现在句柄被缓存，exe 目录不可写时回退到临时目录。
 /// The previous implementation re-opened `zarc.log` for every line, so logging
 /// cost a syscall pair per message and silently did nothing whenever the app
 /// lived in a read-only directory (`/Applications`, `Program Files`). Now the
@@ -1711,7 +1724,9 @@ fn split_enabled(split_size_mib: Option<u64>) -> bool {
     split_size_mib.unwrap_or(0) > 0
 }
 
-/// Strip a trailing `.NNN` volume suffix — *any* index, not just `.001`. Users
+/// 剥离末尾的 `.NNN` 分卷后缀——任意序号均可，不限 `.001`。用户常把
+/// `archive.tar.zst.003` 拖进窗口；从它解析出基础名才能“选择任意分卷”而非报错。
+/// Strip a trailing `.NNN` volume suffix - *any* index, not just `.001`. Users
 /// routinely drop `archive.tar.zst.003` onto the window; resolving the base name
 /// from it is what makes "选择任意分卷" work instead of erroring out.
 fn volume_base_path(volume_path: &Path) -> PathBuf {
@@ -1731,8 +1746,11 @@ fn is_volume_suffix(suffix: &str) -> bool {
     suffix.len() >= 3 && suffix.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// 已存在的 `base.NNN` 兄弟分卷的序号集合，升序。
 /// Indices of every `base.NNN` sibling that exists, ascending.
 ///
+/// 用目录扫描而非 `1, 2, 3, …` 逐个探测。探测在首个缺失处停止，会静默掩盖*空洞*：
+/// 只有 `.001` 和 `.003` 时会报单卷归档并只解出三分之一数据，事后才以无关的 zstd 错误暴露。
 /// A directory scan, not a `1, 2, 3, …` probe. Probing stops at the first miss,
 /// which silently hides a *gap*: with only `.001` and `.003` present it reports
 /// a one-volume archive and decompresses a third of the data, surfacing much
@@ -1749,7 +1767,7 @@ fn volume_indices(base_path: &Path) -> Result<BTreeSet<usize>> {
     let mut indices = BTreeSet::new();
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        // Nothing can exist inside a directory that doesn't exist yet.
+        // 目录尚不存在，内部必然为空 / Nothing can exist inside a directory that doesn't exist yet.
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(indices),
         Err(err) => {
             return Err(err).with_context(|| format!("无法读取分卷所在目录: {}", dir.display()))
@@ -1774,6 +1792,7 @@ fn volume_indices(base_path: &Path) -> Result<BTreeSet<usize>> {
     Ok(indices)
 }
 
+/// 解析完整的 `base.001 .. base.NNN` 分卷链，点名报出任何缺失的分卷。
 /// Resolve the full `base.001 .. base.NNN` chain, naming any missing volume.
 fn validate_volume_chain(base_path: &Path) -> Result<Vec<PathBuf>> {
     let indices = volume_indices(base_path)?;
@@ -1796,6 +1815,7 @@ fn validate_volume_chain(base_path: &Path) -> Result<Vec<PathBuf>> {
     Ok(volumes)
 }
 
+/// `base_path` 的全部现存分卷，升序；空洞按实际报告，需要连续性时用 [`validate_volume_chain`]
 /// Every existing volume of `base_path`, ascending. Gaps are reported as they
 /// are — use [`validate_volume_chain`] when contiguity matters.
 fn existing_volume_paths(base_path: &Path) -> Result<Vec<PathBuf>> {
@@ -1864,6 +1884,7 @@ fn archive_input_bytes(archive: &Path, meta: ArchiveMeta) -> Result<u64> {
     Ok(total)
 }
 
+/// 组成归档的全部文件——单个文件本身，或经校验的完整分卷链。
 /// Every file that makes up `archive` — the single file itself, or the complete
 /// validated volume chain.
 fn archive_volume_paths(archive: &Path, meta: ArchiveMeta) -> Result<Vec<PathBuf>> {
@@ -1873,6 +1894,7 @@ fn archive_volume_paths(archive: &Path, meta: ArchiveMeta) -> Result<Vec<PathBuf
     validate_volume_chain(&volume_base_path(archive))
 }
 
+/// 对归档*整体*哈希：分卷归档须按序覆盖每个分卷；只哈希 `.001` 的摘要无法从重组文件复现。
 /// Hash the archive *as a whole*. For a split archive that means every volume in
 /// order; hashing only `.001` reported a digest that could never be reproduced
 /// from the reassembled file.
@@ -1907,6 +1929,7 @@ fn delete_source_path(source: &Path) -> Result<()> {
     }
 }
 
+/// 基准测试每轮 `write_all` 喂给 zstd 的字节数；足够小，level 22 + 大样本下中止请求也能及时生效。
 /// Bytes fed to zstd per `write_all` during a benchmark pass. Small enough that
 /// an abort request is honoured promptly even at level 22 on a large sample.
 const BENCH_FEED_CHUNK: usize = 4 * 1024 * 1024;
@@ -1957,13 +1980,13 @@ fn load_benchmark_sample(source: &Path, max_bytes: usize) -> Result<Vec<u8>> {
         if total_size <= max_bytes {
             file.read_to_end(&mut sample)?;
         } else {
-            // Sample from beginning, middle, and end
+            // 头/中/尾取样 / Sample from beginning, middle, and end
             let chunk_size = max_bytes / 3;
 
-            // Beginning
+            // 头部 / Beginning
             read_chunk(&mut file, 0, chunk_size, &mut sample)?;
 
-            // Middle
+            // 中部 / Middle
             read_chunk(
                 &mut file,
                 (total_size / 2).saturating_sub(chunk_size / 2),
@@ -1971,7 +1994,7 @@ fn load_benchmark_sample(source: &Path, max_bytes: usize) -> Result<Vec<u8>> {
                 &mut sample,
             )?;
 
-            // End
+            // 尾部 / End
             read_chunk(
                 &mut file,
                 total_size.saturating_sub(chunk_size),
@@ -2001,6 +2024,7 @@ fn load_benchmark_sample(source: &Path, max_bytes: usize) -> Result<Vec<u8>> {
             break;
         }
 
+        // `read` 可能因任何原因返回短读；`take(..).read_to_end` 持续拉取到上限或真 EOF，取样量才与请求一致。
         // `read` may return a short count for any reason; `take(..).read_to_end`
         // keeps pulling until the cap or real EOF, so the sample size actually
         // reflects what was asked for.
@@ -2020,6 +2044,7 @@ fn load_benchmark_sample(source: &Path, max_bytes: usize) -> Result<Vec<u8>> {
 fn read_chunk(file: &mut File, offset: usize, size: usize, sample: &mut Vec<u8>) -> Result<()> {
     use std::io::Seek;
     file.seek(io::SeekFrom::Start(offset as u64))?;
+    // 同上理由：单次 `read` 可能只交回几个字节，把基准样本悄悄缩到请求大小的一小部分。
     // Same reasoning as above: a single `read` could hand back a few bytes and
     // silently shrink the benchmark sample to a fraction of the requested size.
     file.take(size as u64)
@@ -2048,7 +2073,7 @@ fn apply_score(results: &mut [CompressionLevelReport]) {
     for item in results.iter_mut() {
         let speed_score = item.mean_throughput_mi_bs / max_throughput;
         let ratio_score = min_ratio / item.ratio_percent.max(f64::EPSILON);
-        // Weight: 60% for compression ratio, 40% for speed
+        // 权重：压缩率 60%，速度 40% / Weight: 60% for compression ratio, 40% for speed
         item.score = speed_score * 0.40 + ratio_score * 0.60;
     }
 }
@@ -2141,6 +2166,7 @@ fn compress_directory(
         .file_name()
         .map(|v| v.to_owned())
         .with_context(|| format!("目录名称无效: {}", source.display()))?;
+    // 下方所有文件系统操作保持在同一命名空间；这也让源目录本身可以带 DOS 保留名（Windows）。
     // Keep every filesystem operation below in the same namespace. This also
     // lets a source directory itself have a DOS-reserved name on Windows.
     let walk_source = fs_access_path(source)
@@ -2152,6 +2178,7 @@ fn compress_directory(
             .with_context(|| format!("写入根目录失败: {}", source.display()))?;
     }
 
+    // Windows 经普通驱动器路径会把 `NUL`、`CON`、`AUX`、`COM1`... 解析为 DOS 设备，但 NTFS 上仍可能存在同名字面条目（如由其他系统或同步工具创建）。走 verbatim 命名空间遍历可保留这些字面文件，而不是把 `...\NUL` 静默重定向到空设备。
     // Windows treats names such as `NUL`, `CON`, `AUX`, `COM1`... as DOS
     // devices when they are reached through a normal drive path. Such entries
     // can still exist on NTFS (for example after being created by another OS or
@@ -2188,6 +2215,7 @@ fn compress_directory(
             continue;
         }
 
+        // 符号链接曾被静默丢弃：下方两个分支都不匹配，目录树经 ZARC 往返后链接消失且无任何警告。
         // Symlinks used to be dropped silently: neither branch below matched
         // them, so a directory tree round-tripped through ZARC came back with
         // its links missing and no warning anywhere.
@@ -2243,8 +2271,8 @@ fn append_file_with_progress<W: Write>(
     let reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
     let mut progress_reader = ProgressReader::new(reader, reporter.clone());
 
-    // We can't easily check for abort inside tar_builder.append_data without a custom reader that checks state.
-    // But ProgressReader is already there! Let's update ProgressReader.
+    // ProgressReader 仅上报进度；append_data 返回后再检查中止状态。
+    // ProgressReader only reports progress; check abort state after append_data returns.
 
     tar_builder
         .append_data(&mut header, archive_name, &mut progress_reader)
@@ -2342,10 +2370,14 @@ fn decompress_file_from_reader<R: Read>(
     Ok(output_bytes)
 }
 
+/// 暂存路径的序号源，同一目录同进程的两次解压不会选中同名路径。
 /// Serial number for staging paths, so two extractions in the same directory
 /// within one process cannot pick the same name.
 static TEMP_STAGING_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// 在 `parent` 下预留一个未占用的 `.zarc-tmp-<pid>-<seq>` 暂存路径。
+///
+/// 旧名字 `.zarc-tmp-<pid>` 被同目录所有并发解压共享，第二个解压会在开始前*删除*第一个的暂存区。
 /// Reserve an unused `.zarc-tmp-<pid>-<seq>` staging path under `parent`.
 ///
 /// The old name was `.zarc-tmp-<pid>` — shared by every concurrent extraction in
@@ -2363,6 +2395,9 @@ fn unique_temp_path(parent: &Path) -> Result<PathBuf> {
     bail!("无法在 {} 下分配临时解压路径", parent.display());
 }
 
+/// Drop 时删除暂存路径，除非被解除武装。
+///
+/// 手写清理活不过 `?`：match 分支里的 `?` 直接返回函数、跳过下方清理代码，每次失败解压都会留下一整棵半解压目录树。
 /// Deletes a staging path on drop unless disarmed.
 ///
 /// Hand-rolled cleanup did not survive contact with `?`: a `?` inside a match
@@ -2403,6 +2438,7 @@ fn decompress_reader_transactionally<R: Read>(
     output: &Path,
     state: Option<&AppState>,
 ) -> Result<u64> {
+    // 也提前检查：没必要先解压 50 GiB 才发现无权落盘；暂存后再查一次，覆盖中间窗口。
     // Checked up front too: no point decompressing 50 GiB before discovering we
     // are not allowed to place it. Re-checked after staging to cover the window
     // in between.
@@ -2442,6 +2478,7 @@ fn decompress_reader_transactionally<R: Read>(
     Ok(bytes)
 }
 
+/// 尽力 fsync 目录，让已完成的 rename 崩溃后仍存活；Windows 不能以文件方式打开目录，故有 `cfg`。
 /// Best-effort `fsync` of a directory so a completed rename survives a crash.
 /// Directories cannot be opened as files on Windows, hence the `cfg`.
 fn sync_directory(dir: &Path) {
@@ -2486,6 +2523,9 @@ fn validate_compress_paths(
     Ok(())
 }
 
+/// 待创建目标已存在时拒绝启动。
+///
+/// `File::create` 原地截断，输出路径敲错曾在压缩一个字节前就毁掉无关文件。解压已有此防护（`validate_decompress_paths`），压缩此前没有。
 /// Refuse to start when anything we are about to create already exists.
 ///
 /// `File::create` truncates in place, so a mistyped output path used to destroy
@@ -2497,6 +2537,7 @@ fn ensure_output_available(
     split_size: Option<u64>,
 ) -> Result<()> {
     let targets: Vec<PathBuf> = if split_enabled(split_size) {
+        // 同位置上次分卷运行的残留：覆写 `.001` 而留下 `.002`+ 会产生看似完整、实则解码为垃圾的链，故任何存活分卷都按冲突处理。
         // Leftovers from a previous split run in the same spot: writing over
         // `.001` while `.002`+ survive produces a chain that looks complete and
         // decodes to garbage, so treat any surviving volume as a collision.
@@ -2553,7 +2594,7 @@ fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {
         .map(|v| v.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    // Check for multi-volume suffix .001, .002 ...
+    // 检查多分卷后缀 .001, .002 ... / Check for multi-volume suffix .001, .002 ...
     let is_multi = name.len() > 4
         && name.as_bytes()[name.len() - 4] == b'.'
         && name.as_bytes()[name.len() - 3].is_ascii_digit()
@@ -2727,6 +2768,8 @@ fn default_decompress_name(archive: &Path, meta: ArchiveMeta) -> Result<String> 
         ArchiveKind::TarZst => {
             // 默认输出名直接取压缩包原名；重名时由输出保护统一拒绝，
             // 并提示用户自行更改，而不是自动追加后缀。
+            // Default output name is the archive's own name; collisions are rejected by the
+            // output guard, prompting the user to rename manually rather than auto-suffixing.
             let stem = base.trim_end_matches(".tar.zst");
             Ok(stem.to_string())
         }
@@ -2740,6 +2783,7 @@ fn default_decompress_name(archive: &Path, meta: ArchiveMeta) -> Result<String> 
 fn normalize_password(raw: Option<String>) -> Option<SecretString> {
     raw.and_then(|mut value| {
         let trimmed = value.trim().to_string();
+        // 擦除收到的未修剪副本；归一化副本会自行擦除。
         // Scrub the untrimmed copy we were handed; the normalized one scrubs
         // itself on drop.
         value.zeroize();
@@ -2751,6 +2795,9 @@ fn normalize_password(raw: Option<String>) -> Option<SecretString> {
     })
 }
 
+/// 返回可直接用于文件系统访问的路径。
+///
+/// Windows 上普通路径（如 `D:\tree\NUL`）经旧版 DOS 设备命名空间解析，即使磁盘上存在名为 `NUL` 的字面文件，打开的也是空设备。verbatim `\\?\` 命名空间禁用该重写并支持长路径；其他平台原样使用。
 /// Return a path suitable for direct filesystem access.
 ///
 /// On Windows an ordinary path such as `D:\tree\NUL` is parsed through the
@@ -3142,6 +3189,7 @@ mod tests {
             b"literal NUL filename"
         );
 
+        // Windows 上常规递归清理无法寻址字面 NUL 条目，需经 verbatim 命名空间删除特殊文件。
         // On Windows, ordinary recursive cleanup cannot address a literal NUL
         // entry, so remove the special files through the verbatim namespace.
         fs::remove_file(&reserved_source_access).expect("remove source NUL file");
@@ -3218,10 +3266,11 @@ mod tests {
         assert!(report.sample_bytes > 0);
     }
 
-    // --- 加密层 ---
+    // --- 加密层 Encryption layer ---
 
     #[test]
     fn legacy_zenc0001_archives_still_decrypt() {
+        // 前向兼容防护：`ZENC0002` 把 Argon2 参数写入头。v1 归档无此块，读取方必须回退 `LEGACY_KDF` 并在正确偏移读取密文。
         // Forward compatibility guard: `ZENC0002` writes its Argon2 parameters
         // into the header. A v1 archive has no such block, so the reader must
         // fall back to `LEGACY_KDF` and read the ciphertext at the right offset.
@@ -3278,6 +3327,7 @@ mod tests {
 
     #[test]
     fn hostile_kdf_params_are_rejected() {
+        // KDF 参数存入头意味着恶意归档可让 `derive` 分配荒谬内存；边界检查必须在 Argon2 之前拒绝。
         // Storing the KDF parameters in the header means a crafted archive could
         // ask us to allocate an absurd amount of memory during `derive`. The
         // bounds check must reject it before Argon2 ever sees it.
@@ -3298,6 +3348,7 @@ mod tests {
 
     #[test]
     fn absurd_chunk_length_is_rejected_without_allocating() {
+        // 4 字节长度前缀完全受攻击者控制。边界检查之前，伪造的 `0xFFFFFFFF` 会让 `resize(chunk_len, 0)` 尝试预留 4 GiB 并中止进程。
         // A 4-byte length prefix is fully attacker-controlled. Before the bound
         // check, `resize(chunk_len, 0)` on a forged `0xFFFFFFFF` tried to reserve
         // 4 GiB and aborted the process.
@@ -3320,7 +3371,7 @@ mod tests {
         assert!(err.to_string().contains("加密分块长度非法"));
     }
 
-    // --- 输出保护 ---
+    // --- 输出保护 Output guard ---
 
     #[test]
     fn compress_refuses_to_overwrite_existing_output() {
@@ -3363,7 +3414,7 @@ mod tests {
         assert!(stale_second.exists());
     }
 
-    // --- 分卷链 ---
+    // --- 分卷链 Volume chain ---
 
     #[test]
     fn volume_base_path_strips_any_index() {
@@ -3375,7 +3426,7 @@ mod tests {
             volume_base_path(Path::new("/tmp/a.tar.zst.001")),
             PathBuf::from("/tmp/a.tar.zst")
         );
-        // Not a volume suffix: must be left alone.
+        // 非分卷后缀：保持原样 / Not a volume suffix: must be left alone.
         assert_eq!(
             volume_base_path(Path::new("/tmp/a.tar.zst")),
             PathBuf::from("/tmp/a.tar.zst")
@@ -3418,7 +3469,7 @@ mod tests {
         .expect("decompress from middle volume");
         assert_eq!(fs::read(&output).expect("read output"), payload);
 
-        // A hole in the chain must be named, not silently truncated.
+        // 链上的空洞必须点名报出，不能静默截断 / A hole in the chain must be named, not silently truncated.
         fs::remove_file(&volumes[1]).expect("remove volume 2");
         let err = decompress_archive_sync(
             DecompressRequest {
@@ -3461,7 +3512,7 @@ mod tests {
             "hash must cover the whole chain, not just .001"
         );
 
-        // Reproduce it independently by concatenating the volumes.
+        // 通过拼接各分卷独立复现 / Reproduce it independently by concatenating the volumes.
         let mut expected = blake3::Hasher::new();
         for volume in &volumes {
             expected.update(&fs::read(volume).expect("read volume"));
@@ -3496,6 +3547,7 @@ mod tests {
 
     #[test]
     fn multi_volume_writer_survives_absurd_volume_size() {
+        // `volume_limit_mib * 1024 * 1024` 曾 u64 溢出回绕成极小上限，把归档碎化；现在饱和为“单个超大分卷”。
         // `volume_limit_mib * 1024 * 1024` overflowed u64 and wrapped to a tiny
         // limit, shredding the archive. Now it saturates to "one huge volume".
         let temp = tempfile::tempdir().expect("temp dir");
@@ -3513,7 +3565,7 @@ mod tests {
         assert_eq!(fs::read(&volumes[0]).expect("read"), payload);
     }
 
-    // --- 事务性解压 ---
+    // --- 事务性解压 Transactional extraction ---
 
     #[test]
     fn failed_extraction_leaves_no_staging_directory() {
@@ -3530,7 +3582,7 @@ mod tests {
         )
         .expect("compress");
 
-        // Truncate mid-stream so tar extraction fails partway through.
+        // 中途截断，使 tar 解压半途失败 / Truncate mid-stream so tar extraction fails partway through.
         let raw = fs::read(&archive).expect("read archive");
         let broken = temp.path().join("broken.tar.zst");
         fs::write(&broken, &raw[..raw.len() / 2]).expect("write truncated");
@@ -3574,7 +3626,7 @@ mod tests {
         );
     }
 
-    // --- 预览 ---
+    // --- 预览 Preview ---
 
     #[test]
     fn preview_reports_real_size_and_rejects_wrong_password() {
@@ -3603,10 +3655,11 @@ mod tests {
         .expect("preview");
 
         assert_eq!(report.total_files, 1);
-        // Used to be hardcoded to 0 for single-file archives.
+        // 单文件归档曾硬编码为 0 / Used to be hardcoded to 0 for single-file archives.
         assert_eq!(report.uncompressed_size, payload.len() as u64);
         assert_eq!(report.entries[0].path, "blob.bin");
 
+        // 曾因错误密码仍报成功，因为 `Zst` 分支从不校验密码。
         // Used to succeed with the wrong password because the `Zst` arm never
         // looked at it.
         let err = list_archive_content_sync(
@@ -3619,7 +3672,7 @@ mod tests {
             None,
         )
         .expect_err("wrong password must fail");
-        // `to_string()` shows only the outermost context; `{:#}` walks the chain.
+        // 只显示最外层上下文；`{:#}` 遍历整条链 / `to_string()` shows only the outermost context; `{:#}` walks the chain.
         let chain = format!("{err:#}");
         assert!(
             chain.contains("解密失败") || chain.contains("密码"),
@@ -3660,7 +3713,7 @@ mod tests {
         );
     }
 
-    // --- 符号链接 ---
+    // --- 符号链接 Symlinks ---
 
     #[cfg(unix)]
     #[test]
@@ -3702,7 +3755,7 @@ mod tests {
         );
     }
 
-    // --- 基准测试 ---
+    // --- 基准测试 Benchmark ---
 
     #[test]
     fn benchmark_sample_fills_requested_size() {
@@ -3710,6 +3763,7 @@ mod tests {
         let source_path = temp.path().join("blob.bin");
         write_file(&source_path, &deterministic_bytes(9 * 1024 * 1024));
 
+        // 9 MiB 文件上设 3 MiB 上限：从头/中/尾取样，结果应接近上限而非短读的量。
         // 3 MiB cap over a 9 MiB file: sampled from head/middle/tail, so we
         // should get very close to the cap rather than a short read's worth.
         let sample = load_benchmark_sample(&source_path, 3 * 1024 * 1024).expect("sample");

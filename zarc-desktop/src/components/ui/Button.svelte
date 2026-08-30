@@ -11,7 +11,7 @@
     variant?: Variant;
     size?: Size;
     icon?: IconName;
-    /** Shows a spinner and auto-disables; the label stays put to avoid button width jitter. */
+    /** 显示加载并自动禁用；标签原位保留以免按钮宽度抖动。 / Shows a spinner and auto-disables; the label stays put to avoid button width jitter. */
     loading?: boolean;
     class?: string;
     children: Snippet;

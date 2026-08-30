@@ -17,7 +17,7 @@
   let highlights = $derived(operationHighlights(report));
   let fields = $derived(operationFields(report));
 
-  /** Copy the whole report in one go, ready to paste into a ticket or chat window. */
+  /** 一键复制整份报告，可直接粘贴到工单或聊天窗口。 / Copy the whole report in one go, ready to paste into a ticket or chat window. */
   let plainText = $derived(fields.map((f) => `${f.label}: ${f.value}`).join('\n'));
 </script>
 
@@ -39,6 +39,8 @@
   </div>
 
   <!--
+    旧实现把整份报告塞进单个 <pre> 字符串：路径无法单独复制，长哈希撑爆横向滚动条。
+    定义列表让每一项都能独立对齐和复制。
     The old implementation packed the whole report into a single <pre> string:
     paths could not be copied individually and long hashes blew out the
     horizontal scrollbar. A definition list lets every item align and copy

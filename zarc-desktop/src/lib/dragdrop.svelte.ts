@@ -6,7 +6,7 @@ import { t } from './i18n/index.svelte';
 
 class DragDropState {
   visible = $state(false);
-  /** Number of dragged-in files, used to show a precise hint on the overlay. */
+  /** 拖入的文件数，用于在覆盖层上显示精确提示。 / Number of dragged-in files, used to show a precise hint on the overlay. */
   count = $state(0);
 }
 
@@ -17,6 +17,7 @@ async function route(path: string): Promise<void> {
   const name = pathBaseName(path);
   const kindLabel = t(kind === 'folder' ? 'kind.folder' : 'kind.file');
 
+  // 无论走哪个分支都填充两个数据源，这样切换标签页时无需重新选择。
   // Fill both data sources whichever branch runs, so users don't have to
   // re-select when switching tabs.
   app.setCompressSource(path, kind);
@@ -39,6 +40,7 @@ export async function initDragDrop(): Promise<() => void> {
     const payload = event.payload;
     if (payload.type === 'enter' || payload.type === 'over') {
       dropOverlay.visible = true;
+      // `over` 事件不含路径；沿用 `enter` 时记录的数量。
       // The `over` event carries no paths; keep the count recorded on `enter`.
       if ('paths' in payload) {
         dropOverlay.count = payload.paths.length;

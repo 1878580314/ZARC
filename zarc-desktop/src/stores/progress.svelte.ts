@@ -10,9 +10,9 @@ export interface TaskProgress {
   done: boolean;
   error: string | null;
   visible: boolean;
-  /** True once at least one backend event has arrived; before that the bar runs in the indeterminate "preparing" state. */
+  /** 至少收到一个后端事件后为 true；此前进度条以「准备中」的不确定状态运行。 / True once at least one backend event has arrived; before that the bar runs in the indeterminate "preparing" state. */
   started: boolean;
-  /** Task label, letting the Task Hub tell "compressing" apart from "reading the archive listing". */
+  /** 任务标签，让任务中心区分「压缩中」与「读取归档列表」。 / Task label, letting the Task Hub tell "compressing" apart from "reading the archive listing". */
   label: string;
 }
 
@@ -31,7 +31,7 @@ function emptyProgress(): TaskProgress {
   };
 }
 
-/** The backend only emits progress events for compress/decompress; benchmark is driven by the task store. */
+/** 后端仅为压缩/解压发出进度事件；基准测试由任务 store 驱动。 / The backend only emits progress events for compress/decompress; benchmark is driven by the task store. */
 type TrackedKind = Exclude<ProgressKind, 'benchmark'>;
 
 function isTracked(kind: ProgressKind): kind is TrackedKind {
@@ -52,6 +52,7 @@ class ProgressStore {
     slot.throughputMiBs = payload.throughputMiBs;
     slot.etaSeconds = payload.etaSeconds;
     slot.done = payload.done;
+    // 后端错误以中文返回；映射到活动语言后再显示。
     // Backend errors arrive in Chinese; map them to the active locale for display.
     slot.error = payload.error ? translateBackendText(payload.error) : payload.error;
     slot.visible = true;
@@ -64,6 +65,10 @@ class ProgressStore {
   }
 
   /**
+   * 将任务标记为失败。
+   *
+   * 前端侧失败（校验、IPC 拒绝）不会触发后端的 `done` 事件；
+   * 若没有这一步，进度条会永远停在最后收到的百分比。
    * Mark the task as failed.
    *
    * Frontend-side failures (validation, IPC rejections) never trigger the
@@ -78,7 +83,7 @@ class ProgressStore {
     slot.visible = true;
   }
 
-  /** Successful completion: fill the bar; a failed bar is left untouched. */
+  /** 成功完成：填满进度条；失败的进度条则保持原样。 / Successful completion: fill the bar; a failed bar is left untouched. */
   succeed(kind: ProgressKind): void {
     if (!isTracked(kind)) return;
     const slot = this[kind];

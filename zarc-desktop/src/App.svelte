@@ -29,9 +29,11 @@
     let disposed = false;
 
     /**
-     * Asynchronously registered listeners must handle "the component unmounts before
-     * registration completes."
+     * 异步注册的监听器必须处理「注册完成前组件已卸载」的情况。
+     * Asynchronously registered listeners must handle "the component unmounts before registration completes."
      *
+     * 旧实现把 unlisten 赋在 `.then()` 里，销毁函数可能先执行并读到 undefined，
+     * 导致监听器滞留后台而无人清理。
      * The old implementation assigned unlisten inside `.then()`, so the destroy function
      * could run first and read undefined, leaving the listener stranded in the background
      * with nothing to clean it up.
@@ -53,7 +55,7 @@
 </script>
 
 <div class="relative h-full w-full overflow-hidden bg-canvas">
-  <!-- Background aurora: three low-saturation blobs set the overall mood; excluded from hit testing. -->
+  <!-- 背景极光：三个低饱和光斑奠定整体氛围；不参与命中测试。 / Background aurora: three low-saturation blobs set the overall mood; excluded from hit testing. -->
   <div
     class="aurora -top-48 -left-40 h-[34rem] w-[34rem]"
     style="background: var(--zarc-aurora-1)"
@@ -82,7 +84,7 @@
       {/if}
 
       <div class="mx-auto w-full max-w-3xl flex-1 pb-6">
-        <!-- The key block adds a slight horizontal shift on view switches, giving the transition a sense of direction. -->
+        <!-- key 块在视图切换时产生轻微的水平位移，让过渡带方向感。 / The key block adds a slight horizontal shift on view switches, giving the transition a sense of direction. -->
         {#key view}
           <div in:fly={{ x: 12, duration: 220, opacity: 0 }}>
             {#if view === 'decompress'}

@@ -52,11 +52,15 @@ export function formatCount(value: number): string {
 export interface ReportField {
   label: string;
   value: string;
-  /** Long hashes / long paths need a monospace font and wrapping; regular fields do not. */
+  /** 长哈希/长路径需要等宽字体与换行；普通字段则不需要。 / Long hashes / long paths need a monospace font and wrapping; regular fields do not. */
   mono?: boolean;
 }
 
 /**
+ * 将后端报告拆分为结构化字段。
+ *
+ * 旧实现返回一个以 `\n` 拼接的长字符串并直接塞进 `<pre>`，
+ * 既无法正常排版，也无法单独复制路径。
  * Splits the backend report into structured fields.
  *
  * The old implementation returned one long `\n`-joined string dumped into a `<pre>`,
@@ -82,7 +86,7 @@ export function operationFields(report: OperationReport): ReportField[] {
   return fields;
 }
 
-/** The three big numbers at the top of the result card. */
+/** 结果卡片顶部的三个大数字。 / The three big numbers at the top of the result card. */
 export function operationHighlights(report: OperationReport): ReportField[] {
   const saved = report.sourceBytes - report.outputBytes;
   return [
@@ -112,7 +116,7 @@ export function normalizeError(error: unknown): string {
   return translateBackendText(message);
 }
 
-/** File-type icon key, resolved to an inline SVG by `Icon.svelte`. */
+/** 文件类型图标键，由 `Icon.svelte` 解析为内联 SVG。 / File-type icon key, resolved to an inline SVG by `Icon.svelte`. */
 export function getFileIcon(filename: string): string {
   const ext = filename.split('.').pop()?.toLowerCase();
   switch (ext) {
@@ -177,7 +181,7 @@ export function pathBaseName(path: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : path;
 }
 
-/** ZARC volume suffixes look like `.001`: at least three characters, all digits (aligned with the backend `is_volume_suffix`). */
+/** ZARC 分卷后缀形如 `.001`：至少三个字符且全为数字（与后端 `is_volume_suffix` 对齐）。 / ZARC volume suffixes look like `.001`: at least three characters, all digits (aligned with the backend `is_volume_suffix`). */
 function isVolumeSuffix(suffix: string): boolean {
   return suffix.length >= 3 && /^\d+$/.test(suffix);
 }
@@ -189,6 +193,11 @@ export function isArchivePath(path: string): boolean {
 }
 
 /**
+ * 询问文件系统该路径到底是什么。
+ *
+ * 旧实现用 `basename.includes('.')` 猜测，于是 `release.v2/` 被当作文件、
+ * `Makefile` 被当作文件夹，向后端传错了 `includeRootDir` 语义。
+ * 只有当 IPC 失败时才回退到该启发式。
  * Asks the file system what this path actually is.
  *
  * The old implementation guessed with `basename.includes('.')`, so `release.v2/` was
@@ -202,6 +211,7 @@ export async function pathKindLabel(path: string): Promise<PathKind> {
       return info.isDir ? 'folder' : 'file';
     }
   } catch {
+    // 回退到下面的启发式判断。
     // Fall through to the heuristic below.
   }
   return pathBaseName(path).includes('.') ? 'file' : 'folder';
@@ -228,6 +238,10 @@ export interface PasswordStrength {
 }
 
 /**
+ * 粗粒度的密码强度估算。
+ *
+ * 仅本地提示——绝不阻止提交。后端用 Argon2id 派生密钥，
+ * 弱密码的代价由用户承担，但至少应让用户能提前看到。
  * Coarse-grained password strength estimate.
  *
  * A local hint only - it never blocks submission. The backend derives the key with

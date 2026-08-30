@@ -4,11 +4,11 @@
 
   interface Props {
     label?: string;
-    /** Helper text shown below the control in its normal state. */
+    /** 控件正常状态下显示在其下方的辅助文本。 / Helper text shown below the control in its normal state. */
     hint?: string;
-    /** Validation failure message; when present it replaces the hint and turns danger-colored. */
+    /** 校验失败消息；出现时替代辅助文本并转为警示色。 / Validation failure message; when present it replaces the hint and turns danger-colored. */
     error?: string;
-    /** Supplementary info on the right of the label row (e.g. measured size, password strength). */
+    /** 标题行右侧的补充信息（如测量大小、密码强度）。 / Supplementary info on the right of the label row (e.g. measured size, password strength). */
     aside?: Snippet;
     class?: string;
     children: Snippet;

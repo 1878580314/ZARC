@@ -7,7 +7,7 @@
   import Button from './ui/Button.svelte';
   import Spinner from './ui/Spinner.svelte';
 
-  // The sidebar Task Hub is hidden on narrow windows, so progress needs a home in the main column.
+  // 窄窗口下侧边任务中心被隐藏，进度需要安置在主列。 / The sidebar Task Hub is hidden on narrow windows, so progress needs a home in the main column.
   let bars = $derived(
     [
       { key: 'compress', value: progress.compress },

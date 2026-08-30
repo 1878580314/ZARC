@@ -24,7 +24,7 @@
   let report = $state<OperationReport | null>(null);
   let browserReport = $state<ArchiveContentReport | null>(null);
   let touched = $state(false);
-  /** Preview and extraction share the decompress slot; this flag tells "reading the list" apart from a real extraction. */
+  /** 预览与解压共用同一槽位；此标志区分「读取列表」与真实解压。 / Preview and extraction share the decompress slot; this flag tells "reading the list" apart from a real extraction. */
   let previewing = $state(false);
 
   let isSfx = $derived(app.isSfx);
@@ -82,7 +82,7 @@
         browserReport = listed;
         app.setStatus(t('decompress.status.listed', { count: listed.totalFiles }), 'success');
       });
-      // Preview only reads metadata; there's no point leaving a 100% decompress card in the task hub.
+      // 预览只读元数据；没必要在任务中心留一张 100% 的解压卡片。 / Preview only reads metadata; there's no point leaving a 100% decompress card in the task hub.
       if (ok) progress.hide('decompress');
     } finally {
       previewing = false;
@@ -220,7 +220,7 @@
     </div>
   </Card>
 
-  <!-- Self-extracting mode has no sidebar task hub, so progress is shown inline here. -->
+  <!-- 自解压模式没有侧边任务中心，进度在此内联显示。 / Self-extracting mode has no sidebar task hub, so progress is shown inline here. -->
   {#if isSfx && progress.decompress.visible}
     <div class="panel rounded-panel px-5 py-4">
       <ProgressBar progress={progress.decompress} label={t('decompress.progressLabel')} />

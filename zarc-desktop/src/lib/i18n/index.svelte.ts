@@ -14,6 +14,7 @@ function initialLocale(): Locale {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved === 'zh' || saved === 'en') return saved;
   } catch {
+    // 无存储（或被禁用）；回落到默认值。
     // No storage (or blocked); fall through to the default.
   }
   return 'zh';
@@ -21,12 +22,12 @@ function initialLocale(): Locale {
 
 export const i18n = $state({ locale: initialLocale() as Locale });
 
-/** Resolve the current locale and re-run the caller when it changes. */
+/** 解析当前语言，并在其变化时让调用方重新运行。 / Resolve the current locale and re-run the caller when it changes. */
 export function currentLocale(): Locale {
   return i18n.locale;
 }
 
-/** BCP-47 tag for number formatting that follows the UI language. */
+/** 跟随界面语言的数字格式化 BCP-47 标签。 / BCP-47 tag for number formatting that follows the UI language. */
 export function numberLocale(): string {
   return i18n.locale === 'zh' ? 'zh-CN' : 'en-US';
 }
@@ -36,6 +37,7 @@ export function setLocale(locale: Locale): void {
   try {
     localStorage.setItem(STORAGE_KEY, locale);
   } catch {
+    // 持久化尽力而为；内存中的语言仍然生效。
     // Persistence is best-effort; the in-memory locale still applies.
   }
 }
@@ -45,6 +47,10 @@ export function toggleLocale(): void {
 }
 
 /**
+ * 在活动语言中查找词典键，支持插值。
+ *
+ * `{name}` 占位符由 `params` 替换。缺失的键先回落到中文，
+ * 再回落到键本身，因此遗漏的翻译绝不会让界面空白。
  * Look up a dictionary key in the active locale, with interpolation.
  *
  * `{name}` placeholders are replaced from `params`. Missing keys fall back to

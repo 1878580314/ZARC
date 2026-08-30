@@ -5,7 +5,7 @@ export interface Toast {
   level: ToastLevel;
   title: string;
   detail?: string;
-  /** 0 means the toast stays until the user closes it. */
+  /** 0 表示 toast 保留至用户手动关闭。 / 0 means the toast stays until the user closes it. */
   timeout: number;
 }
 
@@ -13,7 +13,7 @@ const DEFAULT_TIMEOUT: Record<ToastLevel, number> = {
   info: 3200,
   success: 3600,
   warn: 6000,
-  // Errors never auto-dismiss: users often need to copy out the full error chain.
+  // 错误从不自动消失：用户常需复制完整错误链。 / Errors never auto-dismiss: users often need to copy out the full error chain.
   error: 0
 };
 
@@ -30,7 +30,7 @@ class ToastStore {
     const resolved = timeout ?? DEFAULT_TIMEOUT[level];
     this.items = [...this.items, { id, level, title, detail, timeout: resolved }];
 
-    // Drop the oldest ones so a long task can't flood the screen.
+    // 丢弃最旧的，防止长任务刷爆屏幕。 / Drop the oldest ones so a long task can't flood the screen.
     while (this.items.length > MAX_VISIBLE) {
       this.dismiss(this.items[0].id);
     }

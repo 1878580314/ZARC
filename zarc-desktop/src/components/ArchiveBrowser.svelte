@@ -18,18 +18,18 @@
   let query = $state('');
 
   interface Row {
-    /** Entry name in browse mode; full relative path in search mode. */
+    /** 浏览模式为条目名；搜索模式为完整相对路径。 / Entry name in browse mode; full relative path in search mode. */
     key: string;
     name: string;
     size: number;
     isDir: boolean;
-    /** Number of files contained in a folder; always 1 for files. */
+    /** 文件夹内包含的文件数；文件恒为 1。 / Number of files contained in a folder; always 1 for files. */
     files: number;
   }
 
   let searching = $derived(query.trim().length > 0);
 
-  /** Search is global: not scoped to the current folder, otherwise users would have to guess the right folder before finding anything. */
+  /** 搜索是全局的：不限于当前文件夹，否则用户得先猜对文件夹才能找到东西。 / Search is global: not scoped to the current folder, otherwise users would have to guess the right folder before finding anything. */
   let searchRows = $derived.by<Row[]>(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return [];
@@ -207,7 +207,7 @@
         <ul class="flex flex-col">
           {#each rows as row (row.key)}
             <li>
-              <!-- Folders are clickable, files are not: different tags keep button semantics off static rows. -->
+              <!-- 文件夹可点击，文件不可：不同标签避免静态行承载按钮语义。 / Folders are clickable, files are not: different tags keep button semantics off static rows. -->
               {#if row.isDir}
                 <button
                   type="button"

@@ -7,19 +7,22 @@
     value: string;
     placeholder?: string;
     disabled?: boolean;
-    /** Read-only is for the "backend decides the host" case (self-extracting mode); leave it off in normal scenarios. */
+    /** 只读用于「后端决定宿主」的场景（自解压模式）；常规场景保持关闭。 / Read-only is for the "backend decides the host" case (self-extracting mode); leave it off in normal scenarios. */
     readonly?: boolean;
     invalid?: boolean;
     icon?: IconName;
     /**
+     * 手动输入敲定（失焦、回车、清空）时调用。
      * Called when manual input is finalized (blur, Enter, clear).
      *
+     * 路径写入 store 会触发目录扫描；按键即回调会每敲一键就遍历文件树，
+     * 因此只在用户「输完」的时刻推送。
      * Writing the path into the store triggers a directory scan; a per-keystroke
      * callback would walk the file tree on every key pressed, so only push at
      * the moment the user is "done typing".
      */
     onCommit?: (value: string) => void;
-    /** Right-side button group, e.g. "File", "Folder", "Browse". */
+    /** 右侧按钮组，如「文件」「文件夹」「浏览」。 / Right-side button group, e.g. "File", "Folder", "Browse". */
     actions?: Snippet;
   }
 
@@ -52,6 +55,8 @@
       <Icon name={icon} size={16} />
     </span>
     <!--
+      此处曾同时设置 `bind:value` 和 `readonly`，导致「留空自动生成」的输出路径
+      完全无法手动输入，只能靠文件对话框。现在仅在显式传入 readonly 时才只读。
       This used to set both `bind:value` and `readonly`, so the "auto-generate
       when empty" output path could not be typed into at all and only the file
       dialog worked. Now it is read-only only when readonly is explicitly passed.

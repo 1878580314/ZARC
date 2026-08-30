@@ -23,8 +23,11 @@
   }: Props = $props();
 
   /**
+   * 输入框内的原始文本。
    * The raw text inside the input.
    *
+   * 不要 `bind:value` 直连数字：用户清空输入的瞬间会被写回 0，光标后留下一个删不掉的零。
+   * 这里文本自由编辑，仅在失焦时归一化。
    * Don't `bind:value` directly to a number: the moment the user clears the
    * field it would be written back to 0, leaving an undeletable zero after the
    * cursor. Here the text is edited freely and normalized only on blur.
@@ -32,7 +35,7 @@
   let draft = $state(String(value));
   let editing = $state(false);
 
-  // Sync external value changes (drag-and-drop, presets, SFX mode) back into the field.
+  // 把外部值变化（拖拽、预设、SFX 模式）同步回输入框。 / Sync external value changes (drag-and-drop, presets, SFX mode) back into the field.
   $effect(() => {
     if (!editing) {
       draft = String(value);
@@ -42,6 +45,8 @@
   function commit(): void {
     editing = false;
     const parsed = Number.parseInt(draft, 10);
+    // min/max 曾被直接透传给 <input>，而浏览器不拦截程序化的越界值，
+    // 「最低等级 999」会原样直达后端。此处真正做钳制。
     // min/max used to be passed straight through to <input>, and the browser doesn't
     // stop programmatic out-of-range values, so "minimum level 999" went to the backend
     // as-is. Clamp for real here.

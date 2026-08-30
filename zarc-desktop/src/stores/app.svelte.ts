@@ -15,6 +15,7 @@ class AppStore {
   sfxInfo = $state<EmbeddedArchiveInfo | null>(null);
   status = $state<AppStatus>({ message: t('status.ready'), level: 'idle' });
 
+  // 跨视图共享的数据源；这是唯一的真源，视图不再各自保留副本。
   // Data sources shared across views; this is the single source of truth, and
   // views no longer keep their own copies.
   compressSource = $state('');
@@ -23,17 +24,17 @@ class AppStore {
   benchmarkSource = $state('');
   benchmarkKind = $state<PathKind>('file');
 
-  /** Measured size of the compression source, shown before submitting to set expectations. */
+  /** 压缩源的实测大小，提交前展示以管理预期。 / Measured size of the compression source, shown before submitting to set expectations. */
   compressInfo = $state<PathInfo | null>(null);
   compressInfoLoading = $state(false);
 
-  /** The compression level lives in the store so the benchmark view can write its recommendation here in one click. */
+  /** 压缩等级存在 store 中，使基准视图可以一键把推荐值写到此处。 / The compression level lives in the store so the benchmark view can write its recommendation here in one click. */
   compressLevel = $state(8);
 
-  /** Shortcuts panel toggle, driven by the sidebar button and Ctrl+/. */
+  /** 快捷键面板开关，由侧边栏按钮和 Ctrl+/ 驱动。 / Shortcuts panel toggle, driven by the sidebar button and Ctrl+/. */
   shortcutsOpen = $state(false);
 
-  /** Incrementing sequence number for discarding stale inspect results, so older ones never overwrite newer ones while the source changes rapidly. */
+  /** 递增序号，用于丢弃过期的检查结果，使旧结果在源快速变化时不会覆盖新结果。 / Incrementing sequence number for discarding stale inspect results, so older ones never overwrite newer ones while the source changes rapidly. */
   #inspectSeq = 0;
 
   get isSfx(): boolean {
@@ -63,7 +64,7 @@ class AppStore {
     this.benchmarkKind = kind;
   }
 
-  /** Apply the level recommended by the benchmark and jump back to the Compress view. */
+  /** 应用基准推荐的等级并跳回压缩视图。 / Apply the level recommended by the benchmark and jump back to the Compress view. */
   applyRecommendedLevel(level: number): void {
     this.compressLevel = level;
     this.setView('compress');

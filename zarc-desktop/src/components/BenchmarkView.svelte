@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog';
   import { app } from '../stores/app.svelte';
   import { task } from '../stores/task.svelte';
   import { toasts } from '../stores/toast.svelte';
   import { registerPrimaryAction } from '../lib/shortcuts';
-  import { api, type BenchmarkReport } from '../lib/api';
+  import { api, pickPath, type BenchmarkReport } from '../lib/api';
   import { formatBytes, formatDuration, pathBaseName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
   import { translateBackendText } from '../lib/i18n/backend';
@@ -56,13 +55,13 @@
   $effect(() => registerPrimaryAction('benchmark', submit));
 
   async function pickFile(): Promise<void> {
-    const selected = await open({ title: t('benchmark.dialog.pickFile'), multiple: false, directory: false });
-    if (typeof selected === 'string') app.setBenchmarkSource(selected, 'file');
+    const selected = await pickPath({ title: t('benchmark.dialog.pickFile') });
+    if (selected) app.setBenchmarkSource(selected, 'file');
   }
 
   async function pickDirectory(): Promise<void> {
-    const selected = await open({ title: t('benchmark.dialog.pickFolder'), multiple: false, directory: true });
-    if (typeof selected === 'string') app.setBenchmarkSource(selected, 'folder');
+    const selected = await pickPath({ title: t('benchmark.dialog.pickFolder'), directory: true });
+    if (selected) app.setBenchmarkSource(selected, 'folder');
   }
 
   async function submit(): Promise<void> {
@@ -192,7 +191,7 @@
           {t('benchmark.useLevel', { level: rep.recommendedLevel })}
         </Button>
         <Button variant="subtle" size="sm" icon="close" onclick={() => (report = null)}>
-          {t('benchmark.close')}
+          {t('shell.close')}
         </Button>
       {/snippet}
 

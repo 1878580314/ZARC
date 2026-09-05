@@ -1,5 +1,4 @@
 import type { OperationReport } from './api';
-import { api } from './api';
 import { t, numberLocale } from './i18n/index.svelte';
 import { translateBackendText } from './i18n/backend';
 
@@ -181,6 +180,12 @@ export function pathBaseName(path: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : path;
 }
 
+/** SFX 宿主旁的 sidecar 载荷文件名（与后端 `SIDECAR_SUFFIX` 对齐）。
+ *  Expected sidecar payload name next to an SFX host (aligned with backend `SIDECAR_SUFFIX`). */
+export function sidecarName(hostPath: string): string {
+  return `${pathBaseName(hostPath)}.payload`;
+}
+
 /** ZARC 分卷后缀形如 `.001`：至少三个字符且全为数字（与后端 `is_volume_suffix` 对齐）。 / ZARC volume suffixes look like `.001`: at least three characters, all digits (aligned with the backend `is_volume_suffix`). */
 function isVolumeSuffix(suffix: string): boolean {
   return suffix.length >= 3 && /^\d+$/.test(suffix);
@@ -190,36 +195,6 @@ export function isArchivePath(path: string): boolean {
   const base = pathBaseName(path).toLowerCase();
   const suffix = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
   return suffix === 'zst' || suffix === 'enc' || suffix === 'exe' || isVolumeSuffix(suffix);
-}
-
-/**
- * 询问文件系统该路径到底是什么。
- *
- * 旧实现用 `basename.includes('.')` 猜测，于是 `release.v2/` 被当作文件、
- * `Makefile` 被当作文件夹，向后端传错了 `includeRootDir` 语义。
- * 只有当 IPC 失败时才回退到该启发式。
- * Asks the file system what this path actually is.
- *
- * The old implementation guessed with `basename.includes('.')`, so `release.v2/` was
- * classified as a file and `Makefile` as a folder, passing the wrong `includeRootDir`
- * semantics to the backend. Only on IPC failure do we fall back to that heuristic.
- */
-export async function pathKindLabel(path: string): Promise<PathKind> {
-  try {
-    const info = await api.inspectPath(path);
-    if (info.exists) {
-      return info.isDir ? 'folder' : 'file';
-    }
-  } catch {
-    // 回退到下面的启发式判断。
-    // Fall through to the heuristic below.
-  }
-  return pathBaseName(path).includes('.') ? 'file' : 'folder';
-}
-
-export function toInt(value: string, fallback: number): number {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 export function clamp(value: number, min: number, max: number): number {

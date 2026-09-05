@@ -5,8 +5,6 @@ export interface Toast {
   level: ToastLevel;
   title: string;
   detail?: string;
-  /** 0 表示 toast 保留至用户手动关闭。 / 0 means the toast stays until the user closes it. */
-  timeout: number;
 }
 
 const DEFAULT_TIMEOUT: Record<ToastLevel, number> = {
@@ -25,10 +23,10 @@ class ToastStore {
   #seq = 0;
   #timers = new Map<number, ReturnType<typeof setTimeout>>();
 
-  push(level: ToastLevel, title: string, detail?: string, timeout?: number): number {
+  push(level: ToastLevel, title: string, detail?: string): number {
     const id = ++this.#seq;
-    const resolved = timeout ?? DEFAULT_TIMEOUT[level];
-    this.items = [...this.items, { id, level, title, detail, timeout: resolved }];
+    const resolved = DEFAULT_TIMEOUT[level];
+    this.items = [...this.items, { id, level, title, detail }];
 
     // 丢弃最旧的，防止长任务刷爆屏幕。 / Drop the oldest ones so a long task can't flood the screen.
     while (this.items.length > MAX_VISIBLE) {
@@ -56,14 +54,6 @@ class ToastStore {
       this.#timers.delete(id);
     }
     this.items = this.items.filter((item) => item.id !== id);
-  }
-
-  clear(): void {
-    for (const timer of this.#timers.values()) {
-      clearTimeout(timer);
-    }
-    this.#timers.clear();
-    this.items = [];
   }
 }
 

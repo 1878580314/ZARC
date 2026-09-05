@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { open, save } from '@tauri-apps/plugin-dialog';
+  import { save } from '@tauri-apps/plugin-dialog';
   import { app } from '../stores/app.svelte';
   import { task } from '../stores/task.svelte';
   import { toasts } from '../stores/toast.svelte';
   import { registerPrimaryAction } from '../lib/shortcuts';
-  import { api, type OperationReport, type OutputKind } from '../lib/api';
+  import { api, pickPath, type OperationReport, type OutputKind } from '../lib/api';
   import { emptyToNull, formatBytes, formatCount, pathBaseName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
   import Card from './ui/Card.svelte';
@@ -99,13 +99,13 @@
   $effect(() => registerPrimaryAction('compress', submit));
 
   async function pickFile(): Promise<void> {
-    const selected = await open({ title: t('compress.dialog.pickFile'), multiple: false, directory: false });
-    if (typeof selected === 'string') app.setCompressSource(selected, 'file');
+    const selected = await pickPath({ title: t('compress.dialog.pickFile') });
+    if (selected) app.setCompressSource(selected, 'file');
   }
 
   async function pickDirectory(): Promise<void> {
-    const selected = await open({ title: t('compress.dialog.pickFolder'), multiple: false, directory: true });
-    if (typeof selected === 'string') app.setCompressSource(selected, 'folder');
+    const selected = await pickPath({ title: t('compress.dialog.pickFolder'), directory: true });
+    if (selected) app.setCompressSource(selected, 'folder');
   }
 
   async function pickOutput(): Promise<void> {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app } from '../stores/app.svelte';
-  import { formatBytes, pathBaseName } from '../lib/format';
+  import { formatBytes, sidecarName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
   import Icon from './ui/Icon.svelte';
   import Tag from './ui/Tag.svelte';
@@ -8,7 +8,7 @@
   let info = $derived(app.sfxInfo);
   let payloadMissing = $derived(info !== null && !info.payloadReady);
   let expectedSidecar = $derived(
-    info ? `${pathBaseName(info.hostPath)}.payload` : ''
+    info ? sidecarName(info.hostPath) : ''
   );
 </script>
 

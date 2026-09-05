@@ -4,11 +4,6 @@ export type Locale = 'zh' | 'en';
 
 const STORAGE_KEY = 'zarc.locale';
 
-export const LOCALES: { id: Locale; label: string }[] = [
-  { id: 'zh', label: '中文' },
-  { id: 'en', label: 'English' }
-];
-
 function initialLocale(): Locale {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);

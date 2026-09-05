@@ -170,7 +170,9 @@ struct CompressRequest {
 
 /// 将请求的线程数收敛到 1..=cores，默认用满全部核心 / Clamp workers into 1..=cores, defaulting to all cores.
 fn resolve_threads(requested: Option<u32>) -> u32 {
-    let cores = num_cpus::get().max(1) as u32;
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
     requested.unwrap_or(cores).clamp(1, cores)
 }
 
@@ -181,19 +183,12 @@ enum OutputKind {
     SfxExe,
 }
 
-impl OutputKind {
-    fn archive_or_default(raw: Option<Self>) -> Self {
-        raw.unwrap_or(Self::Archive)
-    }
-}
-
 struct MultiVolumeWriter {
     base_path: PathBuf,
     current_file: Option<BufWriter<File>>,
     current_index: usize,
     bytes_written_in_volume: u64,
     volume_limit: u64,
-    total_written: u64,
 }
 
 impl MultiVolumeWriter {
@@ -207,13 +202,13 @@ impl MultiVolumeWriter {
             // `saturating_mul`: a nonsense MiB value degrades to "one huge volume", never
             // wraps into a tiny limit that would shred the archive into millions of files.
             volume_limit: volume_limit_mib.saturating_mul(1024 * 1024),
-            total_written: 0,
         }
     }
 
     fn ensure_file(&mut self) -> io::Result<&mut BufWriter<File>> {
         if self.current_file.is_none() {
-            let path = self.volume_path(self.current_index);
+            let path = multi_volume_path(&self.base_path, self.current_index)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             let file = File::create(path)?;
             self.current_file = Some(BufWriter::with_capacity(IO_BUFFER_SIZE, file));
         }
@@ -238,17 +233,6 @@ impl MultiVolumeWriter {
         }
         Ok(())
     }
-
-    fn volume_path(&self, index: usize) -> PathBuf {
-        let ext = format!("{:03}", index);
-        let mut path = self.base_path.clone();
-        let base_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default();
-        path.set_file_name(format!("{base_name}.{ext}"));
-        path
-    }
 }
 
 impl Write for MultiVolumeWriter {
@@ -256,7 +240,6 @@ impl Write for MultiVolumeWriter {
         if self.volume_limit == 0 {
             let writer = self.ensure_file()?;
             let n = writer.write(buf)?;
-            self.total_written += n as u64;
             return Ok(n);
         }
 
@@ -281,7 +264,6 @@ impl Write for MultiVolumeWriter {
 
             written += n;
             self.bytes_written_in_volume += n as u64;
-            self.total_written += n as u64;
         }
         Ok(written)
     }
@@ -425,28 +407,16 @@ fn list_archive_content_inner(
     state: Option<AppState>,
 ) -> Result<ArchiveContentReport> {
     // 第 1 遍 — 计算所有分卷的摘要，而非仅 .001 / Pass 1 — digest every volume, not just .001.
-    let mut hasher = blake3::Hasher::new();
-    let mut hash_buf = vec![0_u8; 1024 * 1024];
-    for volume in archive_volume_paths(archive, meta)? {
-        let mut file = File::open(&volume)
-            .with_context(|| format!("无法打开归档文件: {}", volume.display()))?;
-        loop {
-            if let Some(s) = &state {
-                if s.is_aborted() {
-                    bail!("用户已终止任务");
-                }
+    let volumes = archive_volume_paths(archive, meta)?;
+    let archive_hash = hash_file_sequence(&volumes, |read| {
+        if let Some(s) = &state {
+            if s.is_aborted() {
+                bail!("用户已终止任务");
             }
-            let read = file
-                .read(&mut hash_buf)
-                .with_context(|| format!("读取归档失败: {}", volume.display()))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&hash_buf[..read]);
-            reporter.advance(read as u64);
         }
-    }
-    let archive_hash = hasher.finalize().to_hex().to_string();
+        reporter.advance(read);
+        Ok(())
+    })?;
 
     // 第 2 遍 — 解码。ProgressReader 驱动进度条，AbortableReader 让停止按钮生效（此前预览完全无法停止）
     // Pass 2 — decode. `ProgressReader` drives the bar; `AbortableReader` makes Stop work at all.
@@ -1297,14 +1267,11 @@ fn compress_archive_sync(
     let source_metadata = fs::metadata(&source_access)
         .with_context(|| format!("源路径不存在或无法访问: {}", source.display()))?;
 
-    let output_kind = OutputKind::archive_or_default(request.output_kind);
-    let level = request.level.unwrap_or(8).clamp(1, 22);
-    let include_root_dir = request.include_root_dir.unwrap_or(true);
+    let output_kind = request.output_kind.unwrap_or(OutputKind::Archive);
     let password = normalize_password(request.password.clone());
     let split_size_mib = request.split_size_mib;
     let enable_logging = request.enable_logging.unwrap_or(false);
     let delete_source_after = request.delete_source_after.unwrap_or(false);
-    let request_threads = request.threads;
 
     let source_bytes = count_source_bytes(&source)?;
     let output = resolve_compress_output(
@@ -1350,30 +1317,15 @@ fn compress_archive_sync(
     }
 
     let started = Instant::now();
-    let operation_result = if source_metadata.is_dir() {
-        compress_directory(
-            &source,
-            &output,
-            level,
-            include_root_dir,
-            password.as_deref(),
-            &reporter,
-            state.as_ref(),
-            split_size_mib,
-            request_threads,
-        )
-    } else {
-        compress_file(
-            &source,
-            &output,
-            level,
-            password.as_deref(),
-            &reporter,
-            state.as_ref(),
-            split_size_mib,
-            request_threads,
-        )
-    };
+    let operation_result = compress_source_to(
+        source_metadata.is_dir(),
+        &source,
+        &output,
+        &request,
+        &reporter,
+        state.as_ref(),
+        split_size_mib,
+    );
 
     if let Err(err) = operation_result {
         cleanup_compress_output(&output, split_size_mib);
@@ -1394,12 +1346,7 @@ fn compress_archive_sync(
     );
 
     if delete_source_after {
-        log_to_file(enable_logging, &format!("正在删除源: {}", source.display()));
-        if let Err(err) = delete_source_path(&source) {
-            reporter.fail(err.to_string());
-            log_to_file(enable_logging, &format!("删除源失败: {}", err));
-            return Err(err);
-        }
+        maybe_delete_source(&source, enable_logging, &reporter)?;
     }
 
     reporter.finish();
@@ -1437,7 +1384,7 @@ fn decompress_archive_sync(
     let source_bytes = archive_input_bytes(&archive, meta)?;
 
     let output = resolve_decompress_output(&archive, meta, request.output_path.as_deref())?;
-    validate_decompress_paths(&archive, &output, meta)?;
+    validate_decompress_paths(&archive, &output)?;
 
     let parent = output_parent(&output);
     fs::create_dir_all(parent)
@@ -1674,13 +1621,8 @@ impl MultiVolumeReader {
     }
 
     fn open_next(&mut self) -> io::Result<bool> {
-        let ext = format!("{:03}", self.current_index);
-        let mut path = self.base_path.clone();
-        let base_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default();
-        path.set_file_name(format!("{base_name}.{ext}"));
+        let path = multi_volume_path(&self.base_path, self.current_index)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
         if path.exists() {
             let file = File::open(path)?;
@@ -1903,19 +1845,28 @@ fn calculate_archive_hash(archive: &Path, meta: ArchiveMeta) -> Result<String> {
         return calculate_file_hash(archive);
     }
 
+    let volumes = archive_volume_paths(archive, meta)?;
+    hash_file_sequence(&volumes, |_| Ok(()))
+}
+
+/// 对文件序列做 BLAKE3 摘要；每读出一块调用 `on_chunk`（调用方在此推进进度/检查中止）。
+/// BLAKE3 over a file sequence; `on_chunk` runs per block so callers can hook
+/// progress reporting and abort checks into the same loop.
+fn hash_file_sequence(paths: &[PathBuf], mut on_chunk: impl FnMut(u64) -> Result<()>) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
-    for volume in archive_volume_paths(archive, meta)? {
-        let mut file = File::open(&volume)
-            .with_context(|| format!("无法打开分卷归档: {}", volume.display()))?;
+    for path in paths {
+        let mut file = File::open(path)
+            .with_context(|| format!("无法打开归档文件: {}", path.display()))?;
         loop {
             let read = file
                 .read(&mut buffer)
-                .with_context(|| format!("读取分卷归档失败: {}", volume.display()))?;
+                .with_context(|| format!("读取归档文件失败: {}", path.display()))?;
             if read == 0 {
                 break;
             }
             hasher.update(&buffer[..read]);
+            on_chunk(read as u64)?;
         }
     }
     Ok(hasher.finalize().to_hex().to_string())
@@ -1927,6 +1878,74 @@ fn delete_source_path(source: &Path) -> Result<()> {
     } else {
         fs::remove_file(source).with_context(|| format!("删除源文件失败: {}", source.display()))
     }
+}
+
+fn full_error_chain(err: &anyhow::Error) -> String {
+    // anyhow 的备用 Display 用 ": " 连接上下文链，从而保留 OS 层根因
+    // （如 "No space left on device (os error 28)"），而非被顶层上下文信息丢弃。
+    // anyhow's alternate Display joins the context chain with ": ", so the OS-level
+    // cause (e.g. "No space left on device (os error 28)") is preserved instead of
+    // being dropped by the top-level context message.
+    format!("{err:#}")
+}
+
+/// 目录/单文件压缩分发：普通压缩与 SFX 压缩此前各持一份（含参数解析）。
+/// Directory/single-file compress dispatch, previously duplicated between the
+/// plain and SFX compress paths (parameter resolution included).
+fn compress_source_to(
+    source_is_dir: bool,
+    source: &Path,
+    output: &Path,
+    request: &CompressRequest,
+    reporter: &ProgressReporter,
+    state: Option<&AppState>,
+    split_size_mib: Option<u64>,
+) -> Result<()> {
+    let level = request.level.unwrap_or(8).clamp(1, 22);
+    let include_root_dir = request.include_root_dir.unwrap_or(true);
+    let password = normalize_password(request.password.clone());
+    if source_is_dir {
+        compress_directory(
+            source,
+            output,
+            level,
+            include_root_dir,
+            password.as_deref(),
+            reporter,
+            state,
+            split_size_mib,
+            request.threads,
+        )
+    } else {
+        compress_file(
+            source,
+            output,
+            level,
+            password.as_deref(),
+            reporter,
+            state,
+            split_size_mib,
+            request.threads,
+        )
+    }
+}
+
+/// “压缩后删除源”收尾：普通压缩与 SFX 压缩此前各持一份（且普通版只上报了
+/// 最外层错误，根因链在此统一为完整链）。
+/// "Delete source after compress" epilogue, previously duplicated (the plain
+/// path also reported only the outermost error; both now use the full chain).
+fn maybe_delete_source(
+    source: &Path,
+    enable_logging: bool,
+    reporter: &ProgressReporter,
+) -> Result<()> {
+    log_to_file(enable_logging, &format!("正在删除源: {}", source.display()));
+    if let Err(err) = delete_source_path(source) {
+        reporter.fail(full_error_chain(&err));
+        log_to_file(enable_logging, &format!("删除源失败: {err:#}"));
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// 基准测试每轮 `write_all` 喂给 zstd 的字节数；足够小，level 22 + 大样本下中止请求也能及时生效。
@@ -2560,7 +2579,7 @@ fn ensure_output_available(
     Ok(())
 }
 
-fn validate_decompress_paths(archive: &Path, output: &Path, _meta: ArchiveMeta) -> Result<()> {
+fn validate_decompress_paths(archive: &Path, output: &Path) -> Result<()> {
     if archive == output {
         bail!("解压输出不能覆盖归档文件");
     }
@@ -2570,41 +2589,23 @@ fn validate_decompress_paths(archive: &Path, output: &Path, _meta: ArchiveMeta) 
     Ok(())
 }
 
-fn count_source_bytes_strict(path: &Path) -> Result<u64> {
-    let access_path = fs_access_path(path)
-        .with_context(|| format!("无法准备路径: {}", path.display()))?;
-    let metadata = fs::metadata(&access_path)?;
-    if metadata.is_file() {
-        return Ok(metadata.len());
-    }
-
-    let mut total = 0_u64;
-    for entry in WalkDir::new(&access_path) {
-        let entry = entry.context("遍历目录失败")?;
-        if entry.file_type().is_file() {
-            total = total.saturating_add(entry.metadata()?.len());
-        }
-    }
-    Ok(total)
-}
-
 fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {
     let name = path
         .file_name()
         .map(|v| v.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    // 检查多分卷后缀 .001, .002 ... / Check for multi-volume suffix .001, .002 ...
-    let is_multi = name.len() > 4
-        && name.as_bytes()[name.len() - 4] == b'.'
-        && name.as_bytes()[name.len() - 3].is_ascii_digit()
-        && name.as_bytes()[name.len() - 2].is_ascii_digit()
-        && name.as_bytes()[name.len() - 1].is_ascii_digit();
+    // 检查多分卷后缀：与 volume_base_path / volume_indices 共用 is_volume_suffix 语义，
+    // 任意位数的纯数字后缀均视为分卷（此前此处只认严格 3 位，与剥离逻辑分叉）。
+    // Multi-volume detection shares `is_volume_suffix` semantics with path
+    // stripping/scanning: any all-digit suffix counts (this check used to
+    // accept exactly 3 digits while stripping accepted more).
+    let (stem, is_multi) = match name.rsplit_once('.') {
+        Some((stem, suffix)) if !stem.is_empty() && is_volume_suffix(suffix) => (stem, true),
+        _ => (name.as_str(), false),
+    };
 
-    let mut meta_name = name.clone();
-    if is_multi {
-        meta_name = name[..name.len() - 4].to_string();
-    }
+    let meta_name = stem.to_string();
 
     let encrypted = meta_name.ends_with(".enc");
     let base = if encrypted {
@@ -2649,24 +2650,24 @@ fn resolve_compress_output(
     match output_kind {
         OutputKind::Archive => {
             if encrypted {
-                candidate = ensure_enc_suffix(candidate);
+                candidate = ensure_suffix(candidate, ".enc");
             }
         }
         OutputKind::SfxExe => {
-            candidate = ensure_exe_suffix(candidate);
+            candidate = ensure_suffix(candidate, ".exe");
         }
     }
 
     Ok(candidate)
 }
 
-fn ensure_enc_suffix(path: PathBuf) -> PathBuf {
+fn ensure_suffix(path: PathBuf, suffix: &str) -> PathBuf {
     let name_lower = path
         .file_name()
         .map(|v| v.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    if name_lower.ends_with(".enc") {
+    if name_lower.ends_with(suffix) {
         return path;
     }
 
@@ -2675,25 +2676,7 @@ fn ensure_enc_suffix(path: PathBuf) -> PathBuf {
         .map(|v| v.to_string_lossy().to_string())
         .unwrap_or_else(|| "archive".to_string());
 
-    path.with_file_name(format!("{file_name}.enc"))
-}
-
-fn ensure_exe_suffix(path: PathBuf) -> PathBuf {
-    let name_lower = path
-        .file_name()
-        .map(|v| v.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-
-    if name_lower.ends_with(".exe") {
-        return path;
-    }
-
-    let file_name = path
-        .file_name()
-        .map(|v| v.to_string_lossy().to_string())
-        .unwrap_or_else(|| "archive".to_string());
-
-    path.with_file_name(format!("{file_name}.exe"))
+    path.with_file_name(format!("{file_name}{suffix}"))
 }
 
 fn default_compress_file_name(
@@ -2845,7 +2828,12 @@ fn fs_access_path(path: &Path) -> io::Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-fn count_source_bytes(path: &Path) -> Result<u64> {
+/// 目录树字节统计。`strict` 为 true 时遍历/元数据错误直接返回（解压后校验用），
+/// 为 false 时跳过不可读条目（压缩前进度估算用）；两种策略此前是两份 walk 循环。
+/// Directory-tree byte count. `strict` propagates walk/metadata errors
+/// (post-extract verification); non-strict skips unreadable entries
+/// (pre-compress progress estimate). The two policies used to be two walk loops.
+fn count_walk_bytes(path: &Path, strict: bool) -> Result<u64> {
     let access_path = fs_access_path(path)
         .with_context(|| format!("无法准备源路径: {}", path.display()))?;
     let metadata = fs::metadata(&access_path)
@@ -2855,16 +2843,33 @@ fn count_source_bytes(path: &Path) -> Result<u64> {
     }
 
     let mut total = 0_u64;
-    for entry in WalkDir::new(&access_path)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-    {
-        if entry.file_type().is_file() {
-            total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
+    if strict {
+        for entry in WalkDir::new(&access_path) {
+            let entry = entry.context("遍历目录失败")?;
+            if entry.file_type().is_file() {
+                total = total.saturating_add(entry.metadata()?.len());
+            }
+        }
+    } else {
+        for entry in WalkDir::new(&access_path)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+        {
+            if entry.file_type().is_file() {
+                total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
+            }
         }
     }
 
     Ok(total)
+}
+
+fn count_source_bytes(path: &Path) -> Result<u64> {
+    count_walk_bytes(path, false)
+}
+
+fn count_source_bytes_strict(path: &Path) -> Result<u64> {
+    count_walk_bytes(path, true)
 }
 
 fn throughput(bytes: u64, secs: f64) -> f64 {

@@ -49,10 +49,10 @@ class AppStore {
     this.status = { message, level };
   }
 
-  setCompressSource(path: string, kind: PathKind): void {
+  setCompressSource(path: string, kind: PathKind): Promise<PathInfo | null> {
     this.compressSource = path;
     this.compressKind = kind;
-    void this.#measureCompressSource(path);
+    return this.#measureCompressSource(path);
   }
 
   setDecompressSource(path: string): void {
@@ -71,24 +71,26 @@ class AppStore {
     this.setStatus(t('status.recommendApplied', { level }), 'success');
   }
 
-  async #measureCompressSource(path: string): Promise<void> {
+  async #measureCompressSource(path: string): Promise<PathInfo | null> {
     const seq = ++this.#inspectSeq;
     if (!path) {
       this.compressInfo = null;
       this.compressInfoLoading = false;
-      return;
+      return null;
     }
     this.compressInfoLoading = true;
     try {
       const info = await api.inspectPath(path);
-      if (seq !== this.#inspectSeq) return;
+      if (seq !== this.#inspectSeq) return null;
       this.compressInfo = info;
       if (info.exists) {
         this.compressKind = info.isDir ? 'folder' : 'file';
       }
+      return info;
     } catch {
-      if (seq !== this.#inspectSeq) return;
+      if (seq !== this.#inspectSeq) return null;
       this.compressInfo = null;
+      return null;
     } finally {
       if (seq === this.#inspectSeq) {
         this.compressInfoLoading = false;

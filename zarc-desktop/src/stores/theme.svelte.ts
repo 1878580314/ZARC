@@ -4,12 +4,13 @@ const STORAGE_KEY = 'theme';
 
 class ThemeStore {
   current = $state<ThemeMode>('dark');
-  /** 跟随系统直至用户手动选择主题；此后固定。 / Follows the system until the user picks a theme manually; from then on it sticks. */
-  followSystem = $state(true);
+  /** 跟随系统直至用户手动选择主题；此后固定。外部只读 current 即可。
+   *  Follows the system until the user picks a theme manually; from then on it sticks. */
+  #followSystem = $state(true);
 
   #media: MediaQueryList | null = null;
   #onSystemChange = (event: MediaQueryListEvent): void => {
-    if (!this.followSystem) return;
+    if (!this.#followSystem) return;
     this.current = event.matches ? 'light' : 'dark';
   };
 
@@ -17,7 +18,7 @@ class ThemeStore {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored === 'dark' || stored === 'light') {
       this.current = stored;
-      this.followSystem = false;
+      this.#followSystem = false;
     } else if (typeof matchMedia !== 'undefined') {
       this.current = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
     }
@@ -36,7 +37,7 @@ class ThemeStore {
 
   set(mode: ThemeMode): void {
     this.current = mode;
-    this.followSystem = false;
+    this.#followSystem = false;
     localStorage.setItem(STORAGE_KEY, mode);
   }
 }

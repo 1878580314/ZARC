@@ -1,12 +1,11 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog';
   import { app } from '../stores/app.svelte';
   import { task } from '../stores/task.svelte';
   import { progress } from '../stores/progress.svelte';
   import { toasts } from '../stores/toast.svelte';
   import { registerPrimaryAction } from '../lib/shortcuts';
-  import { api, type ArchiveContentReport, type OperationReport } from '../lib/api';
-  import { emptyToNull, formatBytes, pathBaseName } from '../lib/format';
+  import { api, pickPath, type ArchiveContentReport, type OperationReport } from '../lib/api';
+  import { emptyToNull, formatBytes, pathBaseName, sidecarName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
   import Card from './ui/Card.svelte';
   import Button from './ui/Button.svelte';
@@ -46,24 +45,22 @@
   $effect(() => registerPrimaryAction('decompress', submit));
 
   async function pickSource(): Promise<void> {
-    const selected = await open({
+    const selected = await pickPath({
       title: t('decompress.dialog.pickArchive'),
-      multiple: false,
-      directory: false,
       filters: [
         { name: t('decompress.filter.zarc'), extensions: ['zst', 'enc', 'exe'] },
         { name: t('decompress.filter.all'), extensions: ['*'] }
       ]
     });
-    if (typeof selected === 'string') {
+    if (selected) {
       app.setDecompressSource(selected);
       browserReport = null;
     }
   }
 
   async function pickOutput(): Promise<void> {
-    const selected = await open({ title: t('decompress.dialog.pickOutput'), multiple: false, directory: true });
-    if (typeof selected === 'string') output = selected;
+    const selected = await pickPath({ title: t('decompress.dialog.pickOutput'), directory: true });
+    if (selected) output = selected;
   }
 
   async function preview(): Promise<void> {
@@ -102,7 +99,7 @@
       return;
     }
     if (isSfx && app.sfxInfo && !app.sfxInfo.payloadReady) {
-      const name = `${pathBaseName(app.sfxInfo.hostPath)}.payload`;
+      const name = sidecarName(app.sfxInfo.hostPath);
       app.setStatus(t('shell.sfx.payloadMissingTag'), 'error');
       toasts.warn(t('shell.sfx.payloadMissingTag'), t('shell.sfx.payloadMissing', { name }));
       return;

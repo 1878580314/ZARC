@@ -9,7 +9,6 @@
     disabled?: boolean;
     /** 当开启有风险时置 true（如「完成后删除源文件」）。 / Set to true when enabling it carries risk (e.g. "Delete sources when done"). */
     danger?: boolean;
-    onChange?: (checked: boolean) => void;
   }
 
   let {
@@ -18,14 +17,12 @@
     description,
     icon,
     disabled = false,
-    danger = false,
-    onChange
+    danger = false
   }: Props = $props();
 
   function toggle(): void {
     if (disabled) return;
     checked = !checked;
-    onChange?.(checked);
   }
 
   let onColor = $derived(danger ? 'bg-danger' : 'bg-accent');

@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import type { DialogFilter } from '@tauri-apps/plugin-dialog';
 
 export type OutputKind = 'archive' | 'sfxExe';
 export type ProgressKind = 'compress' | 'decompress' | 'benchmark';
@@ -133,3 +135,20 @@ export const api = {
   inspectPath: (path: string) => invoke<PathInfo>('inspect_path', { path }),
   abort: () => invoke('abort_task')
 };
+
+/** 单选文件/目录对话框：用户取消时返回 null，调用方无需重复类型收窄。
+ *  Single file/directory picker: null on cancel, so call sites stop
+ *  repeating the `typeof selected === 'string'` narrowing. */
+export async function pickPath(options: {
+  title: string;
+  directory?: boolean;
+  filters?: DialogFilter[];
+}): Promise<string | null> {
+  const selected = await openDialog({
+    title: options.title,
+    multiple: false,
+    directory: options.directory ?? false,
+    filters: options.filters
+  });
+  return typeof selected === 'string' ? selected : null;
+}

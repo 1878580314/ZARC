@@ -17,7 +17,9 @@
   let statusText = $derived(
     progress.done ? (progress.error ? t('taskFailed') : t('taskComplete')) : running
   );
-  let width = $derived(`${Math.max(0, Math.min(progress.percent, 100)).toFixed(2)}%`);
+  // progress.percent 入库时已在 store 内 clamp 到 0–100，此处不再重复钳制。
+  // progress.percent is already clamped to 0–100 on write in the store.
+  let width = $derived(`${progress.percent.toFixed(2)}%`);
   let etaText = $derived(progress.etaSeconds === null ? '—' : formatSeconds(progress.etaSeconds));
 
   /**

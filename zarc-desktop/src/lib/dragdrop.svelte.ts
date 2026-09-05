@@ -1,7 +1,7 @@
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { app } from '../stores/app.svelte';
 import { toasts } from '../stores/toast.svelte';
-import { isArchivePath, pathBaseName, pathKindLabel } from './format';
+import { isArchivePath, pathBaseName, type PathKind } from './format';
 import { t } from './i18n/index.svelte';
 
 class DragDropState {
@@ -12,15 +12,23 @@ class DragDropState {
 
 export const dropOverlay = new DragDropState();
 
+/** 无 IPC 时的种类启发式：`release.v2/` 这类带点目录会被误判为文件，
+ *  只有当测量失败/路径不存在时才使用。 / Kind heuristic without IPC... */
+function guessKind(path: string): PathKind {
+  return pathBaseName(path).includes('.') ? 'file' : 'folder';
+}
+
 async function route(path: string): Promise<void> {
-  const kind = await pathKindLabel(path);
+  // setCompressSource 内已做过一次 inspect，直接复用其结果做路由，不再单独调一次 IPC。
+  // setCompressSource already inspects once; reuse its result for routing instead of a second IPC.
+  const info = await app.setCompressSource(path, guessKind(path));
+  const kind: PathKind = info && info.exists ? (info.isDir ? 'folder' : 'file') : guessKind(path);
   const name = pathBaseName(path);
   const kindLabel = t(kind === 'folder' ? 'kind.folder' : 'kind.file');
 
-  // 无论走哪个分支都填充两个数据源，这样切换标签页时无需重新选择。
-  // Fill both data sources whichever branch runs, so users don't have to
-  // re-select when switching tabs.
-  app.setCompressSource(path, kind);
+  // 无论走哪个分支都填充基准数据源，这样切换标签页时无需重新选择。
+  // Fill the benchmark source whichever branch runs, so users don't have to
+  // re-select when switching tabs. (Compress source was already set + measured above.)
   app.setBenchmarkSource(path, kind);
 
   if (kind === 'file' && isArchivePath(path)) {

@@ -67,9 +67,7 @@ pub(super) fn compress_sfx_archive_sync(
     }
 
     let source = PathBuf::from(request.source_path.trim());
-    let level = request.level.unwrap_or(8).clamp(1, 22);
-    let include_root_dir = request.include_root_dir.unwrap_or(true);
-    let password = normalize_password(request.password);
+    let password = normalize_password(request.password.clone());
     let host_exe = std::env::current_exe().context("无法定位当前程序")?;
     if output == host_exe {
         let err = anyhow!("输出路径不能覆盖当前运行中的程序");
@@ -94,30 +92,15 @@ pub(super) fn compress_sfx_archive_sync(
     )?);
 
     let started = Instant::now();
-    let operation_result = if source.is_dir() {
-        compress_directory(
-            &source,
-            &temp_archive,
-            level,
-            include_root_dir,
-            password.as_deref(),
-            &reporter,
-            state.as_ref(),
-            None,
-            request.threads,
-        )
-    } else {
-        compress_file(
-            &source,
-            &temp_archive,
-            level,
-            password.as_deref(),
-            &reporter,
-            state.as_ref(),
-            None,
-            request.threads,
-        )
-    };
+    let operation_result = compress_source_to(
+        source.is_dir(),
+        &source,
+        &temp_archive,
+        &request,
+        &reporter,
+        state.as_ref(),
+        None,
+    );
 
     if let Err(err) = operation_result {
         cleanup_sfx_output(&output);
@@ -160,12 +143,7 @@ pub(super) fn compress_sfx_archive_sync(
     );
 
     if delete_source_after {
-        log_to_file(enable_logging, &format!("正在删除源: {}", source.display()));
-        if let Err(err) = delete_source_path(&source) {
-            reporter.fail(full_error_chain(&err));
-            log_to_file(enable_logging, &format!("删除源失败: {err:#}"));
-            return Err(err);
-        }
+        maybe_delete_source(&source, enable_logging, &reporter)?;
     }
 
     Ok(OperationReport {
@@ -200,24 +178,36 @@ fn build_sfx_executable(
     let created_by_version = env!("CARGO_PKG_VERSION").to_string();
     let parent = output_exe.parent().unwrap_or_else(|| Path::new("."));
 
-    if payload_length >= SFX_SIDECAR_THRESHOLD {
+    let use_sidecar = payload_length >= SFX_SIDECAR_THRESHOLD;
+    let payload_offset = if use_sidecar {
+        0
+    } else {
+        fs::metadata(host_exe)
+            .with_context(|| format!("无法读取宿主程序信息: {}", host_exe.display()))?
+            .len()
+    };
+    let manifest = SfxManifest {
+        payload_offset,
+        payload_length,
+        encrypted: archive_meta.encrypted,
+        archive_kind: archive_meta.kind,
+        default_extract_name,
+        source_name,
+        created_by_version,
+        payload_in_sidecar: use_sidecar,
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).context("无法序列化 SFX manifest")?;
+
+    if use_sidecar {
         // sidecar 布局：EXE 只是宿主原样副本，载荷放在 .payload 中。
         // Sidecar layout: exe stays a plain host copy, payload lives in .payload.
-        let manifest = SfxManifest {
-            payload_offset: 0,
-            payload_length,
-            encrypted: archive_meta.encrypted,
-            archive_kind: archive_meta.kind,
-            default_extract_name,
-            source_name,
-            created_by_version,
-            payload_in_sidecar: true,
-        };
-        let manifest_bytes = serde_json::to_vec(&manifest).context("无法序列化 SFX manifest")?;
         copy_host_exe(host_exe, output_exe, parent)?;
         let sidecar = sidecar_path(output_exe);
-        if let Err(err) = write_sidecar(
+        // sidecar 内 manifest 紧随载荷，故偏移即载荷长度。
+        // Inside the sidecar the manifest follows the payload, so its offset is the payload length.
+        if let Err(err) = write_sfx_container(
             &sidecar,
+            None,
             archive_path,
             payload_length,
             &manifest_bytes,
@@ -231,28 +221,13 @@ fn build_sfx_executable(
     } else {
         // 嵌入式布局：单文件 [host][payload][manifest][trailer]。
         // Embedded layout: single file [host][payload][manifest][trailer].
-        let host_len = fs::metadata(host_exe)
-            .with_context(|| format!("无法读取宿主程序信息: {}", host_exe.display()))?
-            .len();
-        let payload_offset = host_len;
-        let manifest = SfxManifest {
-            payload_offset,
-            payload_length,
-            encrypted: archive_meta.encrypted,
-            archive_kind: archive_meta.kind,
-            default_extract_name,
-            source_name,
-            created_by_version,
-            payload_in_sidecar: false,
-        };
-        let manifest_bytes = serde_json::to_vec(&manifest).context("无法序列化 SFX manifest")?;
         let manifest_offset = payload_offset
             .checked_add(payload_length)
             .with_context(|| "SFX 文件偏移超出范围")?;
-        write_embedded_sfx(
-            host_exe,
-            archive_path,
+        write_sfx_container(
             output_exe,
+            Some(host_exe),
+            archive_path,
             payload_length,
             &manifest_bytes,
             manifest_offset,
@@ -289,10 +264,15 @@ fn copy_host_exe(host_exe: &Path, output_exe: &Path, parent: &Path) -> Result<()
     Ok(())
 }
 
-fn write_embedded_sfx(
-    host_exe: &Path,
+/// 原子写入 `[host?][payload][manifest][trailer]` 容器：嵌入式 SFX 先拷宿主，
+/// sidecar 只写载荷。两种布局此前是两份几乎逐行相同的函数。
+/// Atomically write a `[host?][payload][manifest][trailer]` container: embedded
+/// SFX copies the host first, sidecar writes payload only. The two layouts used
+/// to be near-identical copies of this function.
+fn write_sfx_container(
+    target: &Path,
+    host_exe: Option<&Path>,
     archive_path: &Path,
-    output_exe: &Path,
     payload_length: u64,
     manifest_bytes: &[u8],
     manifest_offset: u64,
@@ -302,10 +282,12 @@ fn write_embedded_sfx(
         .with_context(|| format!("无法在输出目录创建临时文件: {}", parent.display()))?;
     {
         let mut writer = BufWriter::with_capacity(IO_BUFFER_SIZE, temp.as_file_mut());
-        let mut host_file = File::open(host_exe)
-            .with_context(|| format!("无法打开宿主程序: {}", host_exe.display()))?;
-        io::copy(&mut host_file, &mut writer)
-            .with_context(|| format!("复制宿主程序失败: {}", host_exe.display()))?;
+        if let Some(host) = host_exe {
+            let mut host_file = File::open(host)
+                .with_context(|| format!("无法打开宿主程序: {}", host.display()))?;
+            io::copy(&mut host_file, &mut writer)
+                .with_context(|| format!("复制宿主程序失败: {}", host.display()))?;
+        }
         copy_file_prefix(archive_path, payload_length, &mut writer)?;
         writer
             .write_all(manifest_bytes)
@@ -321,42 +303,9 @@ fn write_embedded_sfx(
             .context("写入 SFX trailer manifest length 失败")?;
         writer.flush().context("刷新 SFX 输出失败")?;
     }
-    temp.persist(output_exe)
+    temp.persist(target)
         .map_err(|err| err.error)
-        .with_context(|| format!("保存 SFX 输出失败: {}", output_exe.display()))?;
-    Ok(())
-}
-
-fn write_sidecar(
-    sidecar: &Path,
-    archive_path: &Path,
-    payload_length: u64,
-    manifest_bytes: &[u8],
-    manifest_offset: u64,
-    parent: &Path,
-) -> Result<()> {
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("无法创建侧车临时文件: {}", parent.display()))?;
-    {
-        let mut writer = BufWriter::with_capacity(IO_BUFFER_SIZE, temp.as_file_mut());
-        copy_file_prefix(archive_path, payload_length, &mut writer)?;
-        writer
-            .write_all(manifest_bytes)
-            .context("写入 SFX manifest 失败")?;
-        writer
-            .write_all(SFX_MAGIC)
-            .context("写入 SFX trailer magic 失败")?;
-        writer
-            .write_all(&manifest_offset.to_le_bytes())
-            .context("写入 SFX trailer manifest offset 失败")?;
-        writer
-            .write_all(&(manifest_bytes.len() as u64).to_le_bytes())
-            .context("写入 SFX trailer manifest length 失败")?;
-        writer.flush().context("刷新 SFX 侧车失败")?;
-    }
-    temp.persist(sidecar)
-        .map_err(|err| err.error)
-        .with_context(|| format!("保存 SFX 侧车失败: {}", sidecar.display()))?;
+        .with_context(|| format!("保存 SFX 输出失败: {}", target.display()))?;
     Ok(())
 }
 
@@ -371,15 +320,6 @@ pub(super) fn sidecar_path(exe: &Path) -> PathBuf {
 fn cleanup_sfx_output(exe: &Path) {
     let _ = fs::remove_file(exe);
     let _ = fs::remove_file(sidecar_path(exe));
-}
-
-fn full_error_chain(err: &anyhow::Error) -> String {
-    // anyhow 的备用 Display 用 ": " 连接上下文链，从而保留 OS 层根因
-    // （如 "No space left on device (os error 28)"），而非被顶层上下文信息丢弃。
-    // anyhow's alternate Display joins the context chain with ": ", so the OS-level
-    // cause (e.g. "No space left on device (os error 28)") is preserved instead of
-    // being dropped by the top-level context message.
-    format!("{err:#}")
 }
 
 fn copy_file_prefix(path: &Path, length: u64, output: &mut impl Write) -> Result<()> {
@@ -692,7 +632,7 @@ mod tests {
         let parent = output.parent().unwrap();
         copy_host_exe(&template, &output, parent).expect("copy host");
         let sidecar = sidecar_path(&output);
-        write_sidecar(&sidecar, &archive, payload_length, &manifest_bytes, payload_length, parent)
+        write_sfx_container(&sidecar, None, &archive, payload_length, &manifest_bytes, payload_length, parent)
             .expect("write sidecar");
         output
     }
@@ -937,8 +877,9 @@ mod tests {
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         let parent = output.parent().unwrap();
         copy_host_exe(&template, &output, parent).expect("copy host");
-        write_sidecar(
+        write_sfx_container(
             &sidecar_path(&output),
+            None,
             &archive,
             payload_length,
             &manifest_bytes,

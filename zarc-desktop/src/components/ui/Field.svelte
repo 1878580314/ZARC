@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { setContext, type Snippet } from 'svelte';
+  import { FIELD, type FieldContext } from './field';
   import Icon from './Icon.svelte';
 
   interface Props {
@@ -15,13 +16,15 @@
   }
 
   let { label, hint, error, aside, class: klass = '', children }: Props = $props();
+  const id = $props.id();
+  setContext<FieldContext>(FIELD, { id, description: () => error || hint ? `${id}-help` : undefined, invalid: () => Boolean(error) });
 </script>
 
 <div class="flex flex-col gap-1.5 {klass}">
   {#if label || aside}
     <div class="flex items-baseline justify-between gap-3">
       {#if label}
-        <span class="field-label">{label}</span>
+        <label class="field-label" for={id}>{label}</label>
       {/if}
       {#if aside}
         <span class="min-w-0 text-xs text-fg-faint">{@render aside()}</span>
@@ -32,11 +35,11 @@
   {@render children()}
 
   {#if error}
-    <p class="flex items-start gap-1.5 text-xs text-danger">
+    <p id={`${id}-help`} role="alert" class="flex items-start gap-1.5 text-xs text-danger">
       <Icon name="error" size={13} class="mt-px" />
       <span>{error}</span>
     </p>
   {:else if hint}
-    <p class="text-xs leading-relaxed text-fg-faint">{hint}</p>
+    <p id={`${id}-help`} class="text-xs leading-relaxed text-fg-faint">{hint}</p>
   {/if}
 </div>

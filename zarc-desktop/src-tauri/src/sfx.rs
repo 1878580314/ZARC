@@ -109,7 +109,8 @@ pub(super) fn compress_sfx_archive_sync(
         return Err(err);
     }
 
-    let sidecar = match build_sfx_executable(&host_exe, &temp_archive, &output, &source) {
+    reporter.phase("packaging");
+    let sidecar = match build_sfx_executable_with_state(&host_exe, &temp_archive, &output, &source, state.as_ref()) {
         Ok(sidecar) => sidecar,
         Err(err) => {
             cleanup_sfx_output(&output);
@@ -119,9 +120,7 @@ pub(super) fn compress_sfx_archive_sync(
         }
     };
 
-    reporter.finish();
-
-    let duration = started.elapsed().as_secs_f64();
+    reporter.phase("hashing");
     // sidecar 布局下统计/哈希载荷文件；嵌入式布局下 EXE 自身承载载荷，故统计/哈希 EXE。
     // For the sidecar layout, size/hash the payload file; for embedded, the exe
     // itself carries the payload so size/hash the exe.
@@ -132,7 +131,8 @@ pub(super) fn compress_sfx_archive_sync(
     let output_bytes = fs::metadata(&result_path)
         .with_context(|| format!("无法读取结果文件信息: {}", result_path.display()))?
         .len();
-    let hash = calculate_file_hash(&result_path).ok();
+    let hash = Some(hash_file_sequence(&[result_path], |_| check_abort(state.as_ref()))?);
+    let duration = started.elapsed().as_secs_f64();
 
     log_to_file(
         enable_logging,
@@ -142,10 +142,13 @@ pub(super) fn compress_sfx_archive_sync(
         ),
     );
 
+    check_abort(state.as_ref())?;
     if delete_source_after {
+        reporter.phase("cleanup");
         maybe_delete_source(&source, enable_logging, &reporter)?;
     }
 
+    reporter.finish();
     Ok(OperationReport {
         operation: "compress".to_string(),
         source_path: path_to_string(&source),
@@ -160,11 +163,19 @@ pub(super) fn compress_sfx_archive_sync(
     })
 }
 
+#[cfg(test)]
 fn build_sfx_executable(
     host_exe: &Path,
     archive_path: &Path,
     output_exe: &Path,
     source: &Path,
+) -> Result<Option<PathBuf>> {
+    build_sfx_executable_with_state(host_exe, archive_path, output_exe, source, None)
+}
+
+fn build_sfx_executable_with_state(
+    host_exe: &Path, archive_path: &Path, output_exe: &Path, source: &Path,
+    state: Option<&AppState>,
 ) -> Result<Option<PathBuf>> {
     let archive_meta = detect_archive_meta(archive_path)?;
     let payload_length = fs::metadata(archive_path)
@@ -199,13 +210,13 @@ fn build_sfx_executable(
     let manifest_bytes = serde_json::to_vec(&manifest).context("无法序列化 SFX manifest")?;
 
     if use_sidecar {
-        // sidecar 布局：EXE 只是宿主原样副本，载荷放在 .payload 中。
-        // Sidecar layout: exe stays a plain host copy, payload lives in .payload.
-        copy_host_exe(host_exe, output_exe, parent)?;
+        // EXE 保留清单，缺失载荷时仍能识别自解压模式。
+        // Keep a manifest in the EXE so a missing sidecar remains detectable.
+        write_sidecar_host(host_exe, output_exe, &manifest_bytes, state)?;
         let sidecar = sidecar_path(output_exe);
         // sidecar 内 manifest 紧随载荷，故偏移即载荷长度。
         // Inside the sidecar the manifest follows the payload, so its offset is the payload length.
-        if let Err(err) = write_sfx_container(
+        if let Err(err) = write_sfx_container_with_state(
             &sidecar,
             None,
             archive_path,
@@ -213,6 +224,7 @@ fn build_sfx_executable(
             &manifest_bytes,
             payload_length,
             parent,
+            state,
         ) {
             let _ = fs::remove_file(output_exe);
             return Err(err);
@@ -224,7 +236,7 @@ fn build_sfx_executable(
         let manifest_offset = payload_offset
             .checked_add(payload_length)
             .with_context(|| "SFX 文件偏移超出范围")?;
-        write_sfx_container(
+        write_sfx_container_with_state(
             output_exe,
             Some(host_exe),
             archive_path,
@@ -232,36 +244,10 @@ fn build_sfx_executable(
             &manifest_bytes,
             manifest_offset,
             parent,
+            state,
         )?;
         Ok(None)
     }
-}
-
-/// 将宿主 EXE 原样原子拷贝到 `output_exe`。宿主是合法 PE；原样复制可保证无论载荷多大都能加载
-/// （sidecar 承载载荷时不适用约 2GB 的单映像上限）。
-/// Atomically copy the host exe verbatim to `output_exe`. The host is a
-/// legitimate PE; copying it unchanged keeps it loadable regardless of payload
-/// size (the ~2GB single-image cap doesn't apply when payload is in a sidecar).
-fn copy_host_exe(host_exe: &Path, output_exe: &Path, parent: &Path) -> Result<()> {
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("无法在输出目录创建临时文件: {}", parent.display()))?;
-    {
-        let mut writer = BufWriter::with_capacity(IO_BUFFER_SIZE, temp.as_file_mut());
-        let mut host_file = File::open(host_exe)
-            .with_context(|| format!("无法打开宿主程序: {}", host_exe.display()))?;
-        io::copy(&mut host_file, &mut writer).with_context(|| {
-            format!(
-                "复制宿主程序失败: {} -> {}",
-                host_exe.display(),
-                output_exe.display()
-            )
-        })?;
-        writer.flush().context("刷新宿主副本失败")?;
-    }
-    temp.persist(output_exe)
-        .map_err(|err| err.error)
-        .with_context(|| format!("保存 SFX EXE 失败: {}", output_exe.display()))?;
-    Ok(())
 }
 
 /// 原子写入 `[host?][payload][manifest][trailer]` 容器：嵌入式 SFX 先拷宿主，
@@ -269,6 +255,7 @@ fn copy_host_exe(host_exe: &Path, output_exe: &Path, parent: &Path) -> Result<()
 /// Atomically write a `[host?][payload][manifest][trailer]` container: embedded
 /// SFX copies the host first, sidecar writes payload only. The two layouts used
 /// to be near-identical copies of this function.
+#[cfg(test)]
 fn write_sfx_container(
     target: &Path,
     host_exe: Option<&Path>,
@@ -277,6 +264,19 @@ fn write_sfx_container(
     manifest_bytes: &[u8],
     manifest_offset: u64,
     parent: &Path,
+) -> Result<()> {
+    write_sfx_container_with_state(target, host_exe, archive_path, payload_length, manifest_bytes, manifest_offset, parent, None)
+}
+
+fn write_sidecar_host(host: &Path, output: &Path, manifest: &[u8], state: Option<&AppState>) -> Result<()> {
+    write_sfx_container_with_state(output, Some(host), host, 0, manifest,
+        fs::metadata(host)?.len(), output_parent(output), state)
+}
+
+fn write_sfx_container_with_state(
+    target: &Path, host_exe: Option<&Path>, archive_path: &Path,
+    payload_length: u64, manifest_bytes: &[u8], manifest_offset: u64,
+    parent: &Path, state: Option<&AppState>,
 ) -> Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("无法在输出目录创建临时文件: {}", parent.display()))?;
@@ -288,7 +288,10 @@ fn write_sfx_container(
             io::copy(&mut host_file, &mut writer)
                 .with_context(|| format!("复制宿主程序失败: {}", host.display()))?;
         }
-        copy_file_prefix(archive_path, payload_length, &mut writer)?;
+        let file = File::open(archive_path)?;
+        let mut reader = AbortableReader::new(file.take(payload_length), state);
+        let copied = io::copy(&mut reader, &mut writer).context("复制自解压载荷失败")?;
+        if copied != payload_length { bail!("自解压载荷被截断"); }
         writer
             .write_all(manifest_bytes)
             .context("写入 SFX manifest 失败")?;
@@ -303,7 +306,8 @@ fn write_sfx_container(
             .context("写入 SFX trailer manifest length 失败")?;
         writer.flush().context("刷新 SFX 输出失败")?;
     }
-    temp.persist(target)
+    temp.as_file().sync_all().context("同步自解压文件失败")?;
+    temp.persist_noclobber(target)
         .map_err(|err| err.error)
         .with_context(|| format!("保存 SFX 输出失败: {}", target.display()))?;
     Ok(())
@@ -320,14 +324,6 @@ pub(super) fn sidecar_path(exe: &Path) -> PathBuf {
 fn cleanup_sfx_output(exe: &Path) {
     let _ = fs::remove_file(exe);
     let _ = fs::remove_file(sidecar_path(exe));
-}
-
-fn copy_file_prefix(path: &Path, length: u64, output: &mut impl Write) -> Result<()> {
-    let input = File::open(path).with_context(|| format!("无法打开文件: {}", path.display()))?;
-    let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, input.take(length));
-    io::copy(&mut reader, output)
-        .with_context(|| format!("复制文件内容失败: {}", path.display()))?;
-    Ok(())
 }
 
 fn load_embedded_archive_info_from_path(path: &Path) -> Result<Option<EmbeddedArchiveInfo>> {
@@ -439,9 +435,10 @@ fn extract_embedded_archive_from_path(
         }
     };
 
-    reporter.finish();
+    reporter.phase("hashing");
+    let hash = Some(hash_file_sequence(&[payload_path], |_| check_abort(state.as_ref()))?);
     let duration = started.elapsed().as_secs_f64();
-    let hash = calculate_file_hash(&payload_path).ok();
+    reporter.finish();
 
     Ok(OperationReport {
         operation: "decompress".to_string(),
@@ -554,6 +551,7 @@ fn read_manifest_from_file(path: &Path, strict: bool) -> Result<Option<SfxManife
     let manifest_len: usize = manifest_length
         .try_into()
         .with_context(|| "SFX manifest 过大")?;
+    if manifest_len > 64 * 1024 { bail!("SFX manifest 超出 64 KiB 上限"); }
     let mut manifest_bytes = vec![0_u8; manifest_len];
     file.read_exact(&mut manifest_bytes)
         .context("无法读取 SFX manifest")?;
@@ -563,7 +561,7 @@ fn read_manifest_from_file(path: &Path, strict: bool) -> Result<Option<SfxManife
         .payload_offset
         .checked_add(manifest.payload_length)
         .with_context(|| "SFX payload 长度非法")?;
-    if payload_end > manifest_offset {
+    if (strict || !manifest.payload_in_sidecar) && payload_end > manifest_offset {
         bail!("SFX payload 超出有效范围");
     }
     Ok(Some(manifest))
@@ -630,7 +628,7 @@ mod tests {
         };
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         let parent = output.parent().unwrap();
-        copy_host_exe(&template, &output, parent).expect("copy host");
+        write_sidecar_host(&template, &output, &manifest_bytes, None).expect("write host marker");
         let sidecar = sidecar_path(&output);
         write_sfx_container(&sidecar, None, &archive, payload_length, &manifest_bytes, payload_length, parent)
             .expect("write sidecar");
@@ -780,6 +778,8 @@ mod tests {
         let output = force_sidecar_sfx(temp.path(), b"sidecar payload data", None);
         // 删除侧车后 SFX 不再可读 / Removing the sidecar makes the SFX unreadable.
         fs::remove_file(sidecar_path(&output)).expect("remove sidecar");
+        let info = load_embedded_archive_info_from_path(&output).unwrap().unwrap();
+        assert!(!info.payload_ready, "host marker must survive loss of sidecar");
 
         let dest = temp.path().join("out");
         let err = extract_embedded_archive_from_path(
@@ -821,6 +821,18 @@ mod tests {
         )
         .expect("renamed pair should still extract");
         assert_eq!(fs::read(dest.join("src")).expect("read"), b"renamed pair");
+    }
+
+    #[test]
+    fn manifest_allocation_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bad.payload");
+        let mut bytes = vec![0u8; 65537];
+        bytes.extend_from_slice(SFX_MAGIC);
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&65537u64.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert!(read_manifest_from_file(&path, true).unwrap_err().to_string().contains("64 KiB"));
     }
 
     #[test]
@@ -876,7 +888,7 @@ mod tests {
         };
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         let parent = output.parent().unwrap();
-        copy_host_exe(&template, &output, parent).expect("copy host");
+        write_sidecar_host(&template, &output, &manifest_bytes, None).expect("write host marker");
         write_sfx_container(
             &sidecar_path(&output),
             None,

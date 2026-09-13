@@ -1,0 +1,40 @@
+export const audit = {
+  "zh": {
+    "audit.sfxError": "自解压数据无法读取",
+    "audit.retry": "重新检测",
+    "audit.finalOutput": "最终输出路径",
+    "audit.outputHint": "选择已有文件夹时，会在其内部创建归档同名输出；手动输入新路径时，以该路径作为最终输出。",
+    "audit.openFolder": "打开所在目录",
+    "audit.openFailed": "无法打开输出位置",
+    "audit.abortFailed": "停止请求失败",
+    "audit.previous": "上一页",
+    "audit.next": "下一页",
+    "audit.effectsHint": "切换简化效果，降低模糊与动画开销",
+    "audit.effectsReduced": "简化效果",
+    "audit.effectsFull": "完整效果",
+    "audit.phase.processing": "处理中",
+    "audit.phase.finalizing": "正在完成编码与落盘",
+    "audit.phase.hashing": "正在校验输出",
+    "audit.phase.packaging": "正在封装自解压程序",
+    "audit.phase.cleanup": "正在清理源文件"
+  },
+  "en": {
+    "audit.sfxError": "Self-extracting archive unavailable",
+    "audit.retry": "Retry detection",
+    "audit.finalOutput": "Final output path",
+    "audit.outputHint": "An existing folder receives a named child; a new typed path is used as the final output.",
+    "audit.openFolder": "Show in folder",
+    "audit.openFailed": "Cannot reveal output",
+    "audit.abortFailed": "Could not request cancellation",
+    "audit.previous": "Previous",
+    "audit.next": "Next",
+    "audit.effectsHint": "Toggle simpler effects to reduce blur and animation cost",
+    "audit.effectsReduced": "Simple effects",
+    "audit.effectsFull": "Full effects",
+    "audit.phase.processing": "Processing",
+    "audit.phase.finalizing": "Finishing encoding and syncing",
+    "audit.phase.hashing": "Verifying output",
+    "audit.phase.packaging": "Packaging executable",
+    "audit.phase.cleanup": "Removing source"
+  }
+};

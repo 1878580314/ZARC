@@ -194,7 +194,7 @@ function isVolumeSuffix(suffix: string): boolean {
 export function isArchivePath(path: string): boolean {
   const base = pathBaseName(path).toLowerCase();
   const suffix = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
-  return suffix === 'zst' || suffix === 'enc' || suffix === 'exe' || isVolumeSuffix(suffix);
+  return suffix === 'zst' || suffix === 'enc' || isVolumeSuffix(suffix);
 }
 
 export function clamp(value: number, min: number, max: number): number {

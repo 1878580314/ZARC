@@ -1,5 +1,7 @@
 <script lang="ts">
-  import type { OperationReport } from '../lib/api';
+  import { api, type OperationReport } from '../lib/api';
+  import { toasts } from '../stores/toast.svelte';
+  import { normalizeError } from '../lib/format';
   import { operationFields, operationHighlights } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
   import Card from './ui/Card.svelte';
@@ -23,6 +25,7 @@
 
 <Card {title} icon="checkCircle" subtitle={report.operation} class="animate-[var(--animate-rise)]">
   {#snippet actions()}
+    <Button variant="subtle" size="sm" icon="folder" onclick={() => api.revealOutput(report.outputPath).catch((e) => toasts.error(t('audit.openFailed'), normalizeError(e)))}>{t('audit.openFolder')}</Button>
     <CopyButton text={plainText} label={t('shell.copyFullReport')} />
     <Button variant="subtle" size="sm" onclick={onDismiss}>{t('shell.close')}</Button>
   {/snippet}

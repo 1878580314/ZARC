@@ -34,6 +34,16 @@ interface RegexRule {
 }
 
 const PREFIX_RULES: PrefixRule[] = [
+  { p: '遍历待压缩目录失败，归档已中止', en: 'Source traversal failed; archiving stopped' },
+  { p: '验证归档尾部失败', en: 'Archive tail validation failed' },
+  { p: '归档超过 100000 条预览上限，请直接解压', en: 'Archive exceeds the 100,000-entry preview limit; extract it directly' },
+  { p: '加密结束标记后存在多余数据', en: 'Unexpected data after encrypted stream terminator' },
+  { p: '自解压载荷被截断', en: 'Self-extracting payload was truncated' },
+  { p: 'SFX manifest 超出 64 KiB 上限', en: 'SFX manifest exceeds the 64 KiB limit' },
+  { p: '无法解析输出路径', en: 'Cannot resolve output path' },
+  { p: '无法检查输出路径', en: 'Cannot inspect output path' },
+  { p: '输出路径不存在', en: 'Output path does not exist' },
+
   { p: '任务线程异常: ', en: 'Task thread failed: ' },
   { p: '路径检查线程异常: ', en: 'Path inspection thread failed: ' },
   { p: '归档文件不存在: ', en: 'Archive not found: ' },

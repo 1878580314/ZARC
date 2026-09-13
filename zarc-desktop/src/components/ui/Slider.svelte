@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fieldContext } from './field';
+  const field = fieldContext();
   interface Props {
     value: number;
     min: number;
@@ -28,7 +30,9 @@
 
 <div class="flex flex-col gap-2">
   <input
-    {id}
+    id={id ?? field?.id}
+    aria-describedby={field?.description()}
+    aria-invalid={field?.invalid()}
     type="range"
     {min}
     {max}

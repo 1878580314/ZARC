@@ -44,6 +44,7 @@ export interface EmbeddedArchiveInfo {
 
 export interface ProgressPayload {
   operation: ProgressKind;
+  phase: string;
   processedBytes: number;
   totalBytes: number;
   percent: number;
@@ -132,7 +133,10 @@ export const api = {
     invoke<BenchmarkReport>('benchmark_compression', { request: r }),
   getEmbeddedInfo: () =>
     invoke<EmbeddedArchiveInfo | null>('get_embedded_archive_info'),
-  inspectPath: (path: string) => invoke<PathInfo>('inspect_path', { path }),
+  inspectPath: (path: string, measure = true) => invoke<PathInfo>('inspect_path', { path, measure }),
+  previewOutput: (request: { sourcePath: string; outputPath: string | null; decompress: boolean; encrypted: boolean; outputKind?: OutputKind; splitSizeMib?: number | null }) =>
+    invoke<string>('preview_output_path', { request }),
+  revealOutput: (path: string) => invoke<void>('reveal_output', { path }),
   abort: () => invoke('abort_task')
 };
 

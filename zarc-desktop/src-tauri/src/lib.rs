@@ -361,7 +361,7 @@ async fn list_archive_content(
     })
     .await
     .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| err.to_string())
+    .map_err(|err| full_error_chain(&err))
 }
 
 fn list_archive_content_sync(
@@ -381,9 +381,7 @@ fn list_archive_content_sync(
     }
 
     let archive_bytes = archive_input_bytes(&archive, meta)?;
-    // 归档要走两遍：先哈希再解码；总量预先按 2× 上报，进度条才能单调推进，而不是中途回落到 50%
-    // Two passes over the archive: hash, then decode. Reporting `2 ×` up front keeps the bar monotonic.
-    let reporter = ProgressReporter::new(app, "decompress", archive_bytes.saturating_mul(2));
+    let reporter = ProgressReporter::new(app, "decompress", archive_bytes);
     reporter.begin();
 
     let result = list_archive_content_inner(&archive, meta, password.as_deref(), &reporter, state);
@@ -406,20 +404,6 @@ fn list_archive_content_inner(
     reporter: &ProgressReporter,
     state: Option<AppState>,
 ) -> Result<ArchiveContentReport> {
-    // 第 1 遍 — 计算所有分卷的摘要，而非仅 .001 / Pass 1 — digest every volume, not just .001.
-    let volumes = archive_volume_paths(archive, meta)?;
-    let archive_hash = hash_file_sequence(&volumes, |read| {
-        if let Some(s) = &state {
-            if s.is_aborted() {
-                bail!("用户已终止任务");
-            }
-        }
-        reporter.advance(read);
-        Ok(())
-    })?;
-
-    // 第 2 遍 — 解码。ProgressReader 驱动进度条，AbortableReader 让停止按钮生效（此前预览完全无法停止）
-    // Pass 2 — decode. `ProgressReader` drives the bar; `AbortableReader` makes Stop work at all.
     let reader: Box<dyn Read> = if meta.is_multi_volume {
         Box::new(MultiVolumeReader::new(archive.to_path_buf()))
     } else {
@@ -428,6 +412,8 @@ fn list_archive_content_inner(
                 .with_context(|| format!("无法打开归档文件: {}", archive.display()))?,
         )
     };
+    let hash = Arc::new(Mutex::new(blake3::Hasher::new()));
+    let reader = HashingReader { inner: reader, hash: hash.clone() };
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
     let abortable = AbortableReader::new(progress_reader, state.as_ref());
@@ -447,7 +433,7 @@ fn list_archive_content_inner(
         entries,
         total_files,
         uncompressed_size: total_size,
-        hash: archive_hash,
+        hash: hash_digest(&hash),
     })
 }
 
@@ -466,6 +452,9 @@ fn read_archive_listing<R: Read>(
                 let entry = entry.context("读取归档条目失败")?;
                 let is_dir = entry.header().entry_type().is_dir();
                 let size = entry.size();
+                if entries.len() >= 100_000 {
+                    bail!("归档超过 100000 条预览上限，请直接解压");
+                }
                 entries.push(ArchiveEntry {
                     path: entry.path().context("归档条目路径无效")?.to_string_lossy().to_string(),
                     size,
@@ -473,6 +462,7 @@ fn read_archive_listing<R: Read>(
                 });
                 *total_size = total_size.saturating_add(size);
             }
+            io::copy(&mut tar.into_inner(), &mut io::sink()).context("验证归档尾部失败")?;
         }
         ArchiveKind::Zst => {
             // 单文件 .zst 帧内不含名称与大小，只能解码计数；顺带让错误密码在此直接失败
@@ -531,6 +521,7 @@ struct BenchmarkReport {
 #[serde(rename_all = "camelCase")]
 struct ProgressPayload {
     operation: String,
+    phase: String,
     processed_bytes: u64,
     total_bytes: u64,
     percent: f64,
@@ -583,6 +574,7 @@ struct ProgressState {
     started: Instant,
     processed: AtomicU64,
     last_emit: Mutex<Instant>,
+    phase: Mutex<String>,
 }
 
 #[derive(Clone)]
@@ -601,6 +593,7 @@ impl ProgressReporter {
             operation,
             total,
             state: Arc::new(ProgressState {
+                phase: Mutex::new("processing".into()),
                 started: now,
                 processed: AtomicU64::new(0),
                 // 回拨时间戳，避免第一次 advance 被节流；checked_sub 防止对新时钟做减法下溢
@@ -612,6 +605,11 @@ impl ProgressReporter {
     }
 
     fn begin(&self) {
+        self.emit(false, None, true);
+    }
+
+    fn phase(&self, phase: &str) {
+        *self.state.phase.lock().unwrap_or_else(|e| e.into_inner()) = phase.into();
         self.emit(false, None, true);
     }
 
@@ -675,9 +673,10 @@ impl ProgressReporter {
 
         let payload = ProgressPayload {
             operation: self.operation.to_string(),
+            phase: self.state.phase.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             processed_bytes: processed,
             total_bytes: self.total,
-            percent: percent.clamp(0.0, 100.0),
+            percent: percent.clamp(0.0, if done { 100.0 } else { 99.9 }),
             throughput_mi_bs: throughput,
             eta_seconds,
             done,
@@ -693,6 +692,39 @@ impl ProgressReporter {
 struct ProgressReader<R> {
     inner: R,
     reporter: ProgressReporter,
+}
+
+struct HashingReader<R> {
+    inner: R,
+    hash: Arc<Mutex<blake3::Hasher>>,
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hash.lock().unwrap_or_else(|e| e.into_inner()).update(&buf[..n]);
+        Ok(n)
+    }
+}
+
+fn hash_digest(hash: &Mutex<blake3::Hasher>) -> String {
+    hash.lock().unwrap_or_else(|e| e.into_inner()).finalize().to_hex().to_string()
+}
+
+fn check_abort(state: Option<&AppState>) -> Result<()> {
+    if state.is_some_and(AppState::is_aborted) { bail!("用户已终止任务"); }
+    Ok(())
+}
+
+fn count_source_bytes_cancellable(path: &Path, state: Option<&AppState>) -> Result<u64> {
+    let root = fs_access_path(path)?;
+    let mut total = 0u64;
+    for entry in WalkDir::new(root) {
+        check_abort(state)?;
+        let entry = entry.context("遍历待压缩目录失败，归档已中止")?;
+        if entry.file_type().is_file() { total = total.saturating_add(entry.metadata()?.len()); }
+    }
+    Ok(total)
 }
 
 impl<R> ProgressReader<R> {
@@ -982,6 +1014,10 @@ impl<R: Read> EncryptedReader<R> {
         self.inner.read_exact(&mut len_buf)?;
         let chunk_len = u32::from_be_bytes(len_buf) as usize;
         if chunk_len == 0 {
+            let mut trailing = [0u8; 1];
+            if self.inner.read(&mut trailing)? != 0 {
+                return Err(io::Error::other("加密结束标记后存在多余数据"));
+            }
             self.eof = true;
             self.decrypted.clear();
             self.pos = 0;
@@ -1074,7 +1110,7 @@ async fn compress_archive(
     })
     .await
     .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| err.to_string())
+    .map_err(|err| full_error_chain(&err))
 }
 
 #[tauri::command]
@@ -1090,37 +1126,42 @@ async fn decompress_archive(
     })
     .await
     .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| err.to_string())
+    .map_err(|err| full_error_chain(&err))
 }
 
 #[tauri::command]
 fn get_embedded_archive_info() -> std::result::Result<Option<EmbeddedArchiveInfo>, String> {
-    sfx::load_embedded_archive_info_from_current_exe().map_err(|err| err.to_string())
+    sfx::load_embedded_archive_info_from_current_exe().map_err(|err| full_error_chain(&err))
 }
 
 /// 遍历 `root` 累计文件大小；遍历代价过高时提前截断，让 UI 显示估算值而非卡死
 /// Walk `root` and total up file sizes, stopping early once the walk becomes
 /// expensive enough that the UI would rather show an estimate than block.
-fn measure_directory(root: &Path) -> (u64, u64, bool) {
-    let mut bytes = 0u64;
-    let mut files = 0u64;
+static INSPECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn measure_directory(root: &Path, generation: u64) -> (u64, u64, bool) {
+    let (mut bytes, mut files) = (0u64, 0u64);
+    let started = Instant::now();
     let walk_root = fs_access_path(root).unwrap_or_else(|_| root.to_path_buf());
-    for entry in WalkDir::new(&walk_root)
-        .follow_links(false)
-        .into_iter()
-        .flatten()
-    {
-        if files >= PATH_INSPECT_ENTRY_CAP {
+    let mut incomplete = false;
+    for (visited, entry) in WalkDir::new(&walk_root).follow_links(false).into_iter().enumerate() {
+        if visited as u64 >= PATH_INSPECT_ENTRY_CAP || started.elapsed() > Duration::from_secs(2)
+            || INSPECTION_GENERATION.load(AtomicOrdering::Relaxed) != generation {
             return (bytes, files, true);
         }
-        if entry.file_type().is_file() {
-            if let Ok(metadata) = entry.metadata() {
-                bytes = bytes.saturating_add(metadata.len());
-            }
-            files += 1;
+        match entry {
+            Ok(entry) if entry.file_type().is_file() => {
+                files += 1;
+                match entry.metadata() {
+                    Ok(m) => bytes = bytes.saturating_add(m.len()),
+                    Err(_) => incomplete = true,
+                }
+            },
+            Err(_) => incomplete = true,
+            _ => {},
         }
     }
-    (bytes, files, false)
+    (bytes, files, incomplete)
 }
 
 /// 向文件系统查询路径的真实类型。
@@ -1132,7 +1173,10 @@ fn measure_directory(root: &Path) -> (u64, u64, bool) {
 /// `release.v2/` a file and `Makefile` a directory - and then hands the wrong
 /// `include_root_dir` semantics to the backend. Only a `stat` can answer this.
 #[tauri::command]
-async fn inspect_path(path: String) -> std::result::Result<PathInfo, String> {
+async fn inspect_path(path: String, measure: Option<bool>) -> std::result::Result<PathInfo, String> {
+    let measure = measure.unwrap_or(true);
+    let generation = if measure { INSPECTION_GENERATION.fetch_add(1, AtomicOrdering::Relaxed) + 1 }
+        else { INSPECTION_GENERATION.load(AtomicOrdering::Relaxed) };
     tauri::async_runtime::spawn_blocking(move || {
         let target = PathBuf::from(&path);
         let Ok(access_target) = fs_access_path(&target) else {
@@ -1157,7 +1201,8 @@ async fn inspect_path(path: String) -> std::result::Result<PathInfo, String> {
         };
 
         if metadata.is_dir() {
-            let (size_bytes, file_count, truncated) = measure_directory(&target);
+            let (size_bytes, file_count, truncated) = if measure { measure_directory(&target, generation) }
+                else { (0, 0, true) };
             PathInfo { path, exists: true, is_dir: true, size_bytes, file_count, truncated }
         } else {
             PathInfo {
@@ -1187,7 +1232,7 @@ async fn extract_embedded_archive(
     })
     .await
     .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| err.to_string())
+    .map_err(|err| full_error_chain(&err))
 }
 
 #[tauri::command]
@@ -1202,12 +1247,61 @@ async fn benchmark_compression(
     })
     .await
     .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| err.to_string())
+    .map_err(|err| full_error_chain(&err))
 }
 
 #[tauri::command]
 fn abort_task(state: State<'_, AppState>) {
     state.request_abort();
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputPreviewRequest {
+    source_path: String,
+    output_path: Option<String>,
+    decompress: bool,
+    encrypted: bool,
+    output_kind: Option<OutputKind>,
+    split_size_mib: Option<u64>,
+}
+
+#[tauri::command]
+async fn preview_output_path(request: OutputPreviewRequest) -> std::result::Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<String> {
+        let source = PathBuf::from(request.source_path.trim());
+        let mut output = if request.decompress {
+            let meta = detect_archive_meta(&source)?;
+            resolve_decompress_output(&source, meta, request.output_path.as_deref())?
+        } else {
+            resolve_compress_output(&source, request.output_path.as_deref(), request.encrypted,
+                request.output_kind.unwrap_or(OutputKind::Archive))?
+        };
+        if !request.decompress && split_enabled(request.split_size_mib) {
+            output = multi_volume_path(&output, 1)?;
+        }
+        Ok(path_to_string(&resolve_future_path(&output)?))
+    }).await.map_err(|e| e.to_string())?.map_err(|e| full_error_chain(&e))
+}
+
+#[tauri::command]
+async fn reveal_output(path: String) -> std::result::Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+        let path = fs::canonicalize(path).context("输出路径不存在")?;
+        #[cfg(windows)]
+        {
+            // Explorer 的 /select 参数不支持 verbatim 前缀。 / Explorer expects a display path.
+            let raw = path.to_string_lossy();
+            let display = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") }
+                else { raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string() };
+            std::process::Command::new("explorer.exe").arg(format!("/select,{display}")).spawn()?;
+        }
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open").arg("-R").arg(&path).spawn()?;
+        #[cfg(all(unix, not(target_os = "macos")))]
+        std::process::Command::new("xdg-open").arg(output_parent(&path)).spawn()?;
+        Ok(())
+    }).await.map_err(|e| e.to_string())?.map_err(|e| full_error_chain(&e))
 }
 
 /// 日志落盘句柄，每进程至多打开一次。
@@ -1268,16 +1362,21 @@ fn compress_archive_sync(
         .with_context(|| format!("源路径不存在或无法访问: {}", source.display()))?;
 
     let output_kind = request.output_kind.unwrap_or(OutputKind::Archive);
-    let password = normalize_password(request.password.clone());
+    let encrypted = request.password.as_ref().is_some_and(|p| !p.trim().is_empty());
     let split_size_mib = request.split_size_mib;
     let enable_logging = request.enable_logging.unwrap_or(false);
     let delete_source_after = request.delete_source_after.unwrap_or(false);
 
-    let source_bytes = count_source_bytes(&source)?;
+    check_abort(state.as_ref())?;
+    let source_bytes = count_source_bytes_cancellable(&source, state.as_ref())?;
+    if let Some(raw) = request.output_path.as_deref() {
+        let raw = Path::new(raw.trim());
+        if !raw.is_dir() { ensure_output_available(raw, output_kind, split_size_mib)?; }
+    }
     let output = resolve_compress_output(
         &source,
         request.output_path.as_deref(),
-        password.is_some(),
+        encrypted,
         output_kind,
     )?;
     validate_compress_paths(&source, &output, output_kind, split_size_mib)?;
@@ -1334,8 +1433,9 @@ fn compress_archive_sync(
         return Err(err);
     }
 
+    reporter.phase("hashing");
+    let (reported_output, output_bytes, hash) = compress_output_report(&output, split_size_mib, state.as_ref())?;
     let duration = started.elapsed().as_secs_f64();
-    let (reported_output, output_bytes, hash) = compress_output_report(&output, split_size_mib)?;
 
     log_to_file(
         enable_logging,
@@ -1345,7 +1445,9 @@ fn compress_archive_sync(
         ),
     );
 
+    check_abort(state.as_ref())?;
     if delete_source_after {
+        reporter.phase("cleanup");
         maybe_delete_source(&source, enable_logging, &reporter)?;
     }
 
@@ -1404,6 +1506,8 @@ fn decompress_archive_sync(
         )
     };
 
+    let hash = Arc::new(Mutex::new(blake3::Hasher::new()));
+    let reader = HashingReader { inner: reader, hash: hash.clone() };
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
@@ -1426,7 +1530,7 @@ fn decompress_archive_sync(
     reporter.finish();
 
     let duration = started.elapsed().as_secs_f64();
-    let hash = calculate_archive_hash(&archive, meta).ok();
+    let hash = Some(hash_digest(&hash));
 
     Ok(OperationReport {
         operation: "decompress".to_string(),
@@ -1442,6 +1546,7 @@ fn decompress_archive_sync(
     })
 }
 
+#[cfg(test)]
 fn calculate_file_hash(path: &Path) -> Result<String> {
     let file = File::open(path)?;
     let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
@@ -1782,6 +1887,7 @@ fn cleanup_compress_output(base_path: &Path, split_size_mib: Option<u64>) {
 fn compress_output_report(
     base_path: &Path,
     split_size_mib: Option<u64>,
+    state: Option<&AppState>,
 ) -> Result<(PathBuf, u64, Option<String>)> {
     if !split_enabled(split_size_mib) {
         let output_bytes = fs::metadata(base_path)
@@ -1790,7 +1896,7 @@ fn compress_output_report(
         return Ok((
             base_path.to_path_buf(),
             output_bytes,
-            calculate_file_hash(base_path).ok(),
+            Some(hash_file_sequence(&[base_path.to_path_buf()], |_| check_abort(state))?),
         ));
     }
 
@@ -1811,7 +1917,8 @@ fn compress_output_report(
         );
     }
 
-    Ok((volumes[0].clone(), output_bytes, None))
+    let hash = hash_file_sequence(&volumes, |_| check_abort(state))?;
+    Ok((volumes[0].clone(), output_bytes, Some(hash)))
 }
 
 fn archive_input_bytes(archive: &Path, meta: ArchiveMeta) -> Result<u64> {
@@ -1840,6 +1947,7 @@ fn archive_volume_paths(archive: &Path, meta: ArchiveMeta) -> Result<Vec<PathBuf
 /// Hash the archive *as a whole*. For a split archive that means every volume in
 /// order; hashing only `.001` reported a digest that could never be reproduced
 /// from the reassembled file.
+#[cfg(test)]
 fn calculate_archive_hash(archive: &Path, meta: ArchiveMeta) -> Result<String> {
     if !meta.is_multi_volume {
         return calculate_file_hash(archive);
@@ -1961,6 +2069,7 @@ fn compress_to_count(
 ) -> Result<u64> {
     let sink = CountingWriter::new(io::sink());
     let mut encoder = zstd::Encoder::new(sink, level).context("创建 zstd 编码器失败")?;
+    encoder.include_checksum(true).context("启用 zstd 校验失败")?;
     encoder
         .multithread(threads)
         .context("无法开启 zstd 多线程压缩")?;
@@ -2133,6 +2242,7 @@ fn compress_file(
     let output_sink = create_output_sink(output, password, split_size_mib)?;
     let mut encoder = zstd::Encoder::new(output_sink, level).context("创建 zstd 编码器失败")?;
 
+    encoder.include_checksum(true).context("启用 zstd 校验失败")?;
     encoder
         .multithread(resolve_threads(threads))
         .context("无法开启 zstd 多线程压缩")?;
@@ -2156,7 +2266,9 @@ fn compress_file(
         reporter.advance(count as u64);
     }
 
+    reporter.phase("finalizing");
     let sink = encoder.finish().context("无法完成压缩输出")?;
+    check_abort(state)?;
     sink.finalize()?;
 
     Ok(())
@@ -2176,6 +2288,7 @@ fn compress_directory(
     let output_sink = create_output_sink(output, password, split_size_mib)?;
     let mut encoder = zstd::Encoder::new(output_sink, level).context("创建 zstd 编码器失败")?;
 
+    encoder.include_checksum(true).context("启用 zstd 校验失败")?;
     encoder
         .multithread(resolve_threads(threads))
         .context("无法开启 zstd 多线程压缩")?;
@@ -2208,8 +2321,8 @@ fn compress_directory(
         .min_depth(1)
         .sort_by_file_name()
         .into_iter()
-        .filter_map(std::result::Result::ok)
     {
+        let entry = entry.context("遍历待压缩目录失败，归档已中止")?;
         if let Some(s) = state {
             if s.is_aborted() {
                 bail!("用户已终止任务");
@@ -2262,7 +2375,9 @@ fn compress_directory(
 
     tar_builder.finish().context("tar 归档收尾失败")?;
     let encoder = tar_builder.into_inner().context("无法获取压缩编码器")?;
+    reporter.phase("finalizing");
     let sink = encoder.finish().context("无法完成目录压缩输出")?;
+    check_abort(state)?;
     sink.finalize()?;
 
     Ok(())
@@ -2288,10 +2403,8 @@ fn append_file_with_progress<W: Write>(
     header.set_cksum();
 
     let reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
-    let mut progress_reader = ProgressReader::new(reader, reporter.clone());
-
-    // ProgressReader 仅上报进度；append_data 返回后再检查中止状态。
-    // ProgressReader only reports progress; check abort state after append_data returns.
+    let mut progress_reader = AbortableReader::new(
+        ProgressReader::new(reader, reporter.clone()), state);
 
     tar_builder
         .append_data(&mut header, archive_name, &mut progress_reader)
@@ -2324,7 +2437,9 @@ impl<R: Read> Read for AbortableReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(s) = &self.state {
             if s.is_aborted() {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "任务已终止"));
+                // Interrupted 会被 io::copy 自动重试，取消必须永久结束读取。
+                // io::copy retries Interrupted; cancellation must terminate the read.
+                return Err(io::Error::other("用户已终止任务"));
             }
         }
         self.inner.read(buf)
@@ -2344,6 +2459,10 @@ fn decompress_tar_from_reader<R: Read>(
     archive
         .unpack(&output_access)
         .with_context(|| format!("解包归档失败: {}", output_dir.display()))?;
+    // tar 的结束标记早于 zstd/加密流结尾，提交前必须验证剩余数据。
+    // TAR EOF precedes the outer stream EOF; validate the tail before commit.
+    io::copy(&mut archive.into_inner(), &mut io::sink())
+        .context("验证归档尾部失败")?;
     Ok(())
 }
 
@@ -2474,12 +2593,13 @@ fn decompress_reader_transactionally<R: Read>(
             fs::create_dir_all(&temp_path)
                 .with_context(|| format!("创建临时解压目录失败: {}", temp_path.display()))?;
             decompress_tar_from_reader(reader, &temp_path, state)?;
-            count_source_bytes_strict(&temp_path)?
+            count_source_bytes_cancellable(&temp_path, state)?
         }
         ArchiveKind::Zst => decompress_file_from_reader(reader, &temp_path, state)?,
     };
 
-    if output.exists() {
+    check_abort(state)?;
+    if output.try_exists()? {
         bail!("输出路径已存在，请自行更改输出名称: {}", output.display());
     }
 
@@ -2510,7 +2630,32 @@ fn sync_directory(dir: &Path) {
 }
 
 fn output_parent(path: &Path) -> &Path {
-    path.parent().unwrap_or_else(|| Path::new("."))
+    path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
+}
+
+/// 逐段解析已有祖先，保留尚未创建的后缀；符号链接和 .. 使用同一命名空间。
+/// Resolve existing ancestors component by component, retaining the future suffix.
+fn resolve_future_path(path: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+    let absolute = if path.is_absolute() { path.to_path_buf() }
+        else { std::env::current_dir()?.join(path) };
+    let mut resolved = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::CurDir => {},
+            Component::ParentDir => { resolved.pop(); },
+            other => {
+                resolved.push(other.as_os_str());
+                match fs::symlink_metadata(&resolved) {
+                    Ok(_) => { resolved = fs::canonicalize(&resolved)
+                        .context("无法解析输出路径")?; },
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+                    Err(e) => return Err(e).context("无法检查输出路径"),
+                }
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 fn validate_compress_paths(
@@ -2523,14 +2668,7 @@ fn validate_compress_paths(
         .with_context(|| format!("无法准备源路径: {}", source.display()))?;
     let source = fs::canonicalize(&source_access)
         .with_context(|| format!("无法解析源路径: {}", source.display()))?;
-    let output_parent = output_parent(output);
-    let output_parent =
-        fs::canonicalize(output_parent).unwrap_or_else(|_| output_parent.to_path_buf());
-    let output_abs = output_parent.join(
-        output
-            .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("archive")),
-    );
+    let output_abs = resolve_future_path(output)?;
 
     if output_abs == source {
         bail!("输出路径不能覆盖源路径");
@@ -2649,9 +2787,12 @@ fn resolve_compress_output(
 
     match output_kind {
         OutputKind::Archive => {
-            if encrypted {
-                candidate = ensure_suffix(candidate, ".enc");
-            }
+            let name = candidate.file_name().context("输出名称为空")?.to_string_lossy();
+            let base = strip_suffix_ci(&name, ".enc");
+            let base = strip_suffix_ci(strip_suffix_ci(base, ".tar.zst"), ".zst");
+            let is_dir = fs::metadata(fs_access_path(source)?)?.is_dir();
+            let suffix = if is_dir { ".tar.zst" } else { ".zst" };
+            candidate = candidate.with_file_name(format!("{base}{suffix}{}", if encrypted { ".enc" } else { "" }));
         }
         OutputKind::SfxExe => {
             candidate = ensure_suffix(candidate, ".exe");
@@ -2718,7 +2859,10 @@ fn resolve_decompress_output(
         Some(path) => {
             let candidate = PathBuf::from(path.trim());
             match meta.kind {
-                ArchiveKind::TarZst => Ok(candidate),
+                ArchiveKind::TarZst => {
+                    if candidate.is_dir() { Ok(candidate.join(default_name)) }
+                    else { Ok(candidate) }
+                },
                 ArchiveKind::Zst => {
                     if candidate.exists() && candidate.is_dir() {
                         Ok(candidate.join(default_name))
@@ -2736,13 +2880,14 @@ fn resolve_decompress_output(
 }
 
 fn default_decompress_name(archive: &Path, meta: ArchiveMeta) -> Result<String> {
+    let archive = volume_base_path(archive);
     let file_name = archive
         .file_name()
         .with_context(|| format!("无效路径: {}", archive.display()))?
         .to_string_lossy();
 
     let base = if meta.encrypted {
-        file_name.trim_end_matches(".enc").to_string()
+        strip_suffix_ci(&file_name, ".enc").to_string()
     } else {
         file_name.to_string()
     };
@@ -2753,14 +2898,19 @@ fn default_decompress_name(archive: &Path, meta: ArchiveMeta) -> Result<String> 
             // 并提示用户自行更改，而不是自动追加后缀。
             // Default output name is the archive's own name; collisions are rejected by the
             // output guard, prompting the user to rename manually rather than auto-suffixing.
-            let stem = base.trim_end_matches(".tar.zst");
+            let stem = strip_suffix_ci(&base, ".tar.zst");
             Ok(stem.to_string())
         }
         ArchiveKind::Zst => {
-            let stem = base.trim_end_matches(".zst");
+            let stem = strip_suffix_ci(&base, ".zst");
             Ok(stem.to_string())
         }
     }
+}
+
+fn strip_suffix_ci<'a>(name: &'a str, suffix: &str) -> &'a str {
+    if name.to_ascii_lowercase().ends_with(suffix) { &name[..name.len() - suffix.len()] }
+    else { name }
 }
 
 fn normalize_password(raw: Option<String>) -> Option<SecretString> {
@@ -2792,7 +2942,12 @@ fn normalize_password(raw: Option<String>) -> Option<SecretString> {
 fn fs_access_path(path: &Path) -> io::Result<PathBuf> {
     use std::path::{Component, Prefix};
 
-    let absolute = std::path::absolute(path)?;
+    // GetFullPathName（std::path::absolute）会先把 NUL 等名称变成设备路径。
+    // Prefix before OS normalization, otherwise DOS names become device paths.
+    let absolute = if path.is_absolute() { path.to_path_buf() }
+        else if matches!(path.components().next(), Some(Component::Prefix(_))) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "请使用完整驱动器路径"));
+        } else { std::env::current_dir()?.join(path) };
     let mut components = absolute.components();
     let Some(Component::Prefix(prefix_component)) = components.next() else {
         return Ok(absolute);
@@ -2815,7 +2970,7 @@ fn fs_access_path(path: &Path) -> io::Result<PathBuf> {
     for component in components {
         match component {
             Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
-            Component::ParentDir => verbatim.push(".."),
+            Component::ParentDir => { verbatim.pop(); },
             Component::Normal(part) => verbatim.push(part),
         }
     }
@@ -2826,50 +2981,6 @@ fn fs_access_path(path: &Path) -> io::Result<PathBuf> {
 #[cfg(not(windows))]
 fn fs_access_path(path: &Path) -> io::Result<PathBuf> {
     Ok(path.to_path_buf())
-}
-
-/// 目录树字节统计。`strict` 为 true 时遍历/元数据错误直接返回（解压后校验用），
-/// 为 false 时跳过不可读条目（压缩前进度估算用）；两种策略此前是两份 walk 循环。
-/// Directory-tree byte count. `strict` propagates walk/metadata errors
-/// (post-extract verification); non-strict skips unreadable entries
-/// (pre-compress progress estimate). The two policies used to be two walk loops.
-fn count_walk_bytes(path: &Path, strict: bool) -> Result<u64> {
-    let access_path = fs_access_path(path)
-        .with_context(|| format!("无法准备源路径: {}", path.display()))?;
-    let metadata = fs::metadata(&access_path)
-        .with_context(|| format!("无法读取文件信息: {}", path.display()))?;
-    if metadata.is_file() {
-        return Ok(metadata.len());
-    }
-
-    let mut total = 0_u64;
-    if strict {
-        for entry in WalkDir::new(&access_path) {
-            let entry = entry.context("遍历目录失败")?;
-            if entry.file_type().is_file() {
-                total = total.saturating_add(entry.metadata()?.len());
-            }
-        }
-    } else {
-        for entry in WalkDir::new(&access_path)
-            .into_iter()
-            .filter_map(std::result::Result::ok)
-        {
-            if entry.file_type().is_file() {
-                total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
-            }
-        }
-    }
-
-    Ok(total)
-}
-
-fn count_source_bytes(path: &Path) -> Result<u64> {
-    count_walk_bytes(path, false)
-}
-
-fn count_source_bytes_strict(path: &Path) -> Result<u64> {
-    count_walk_bytes(path, true)
 }
 
 fn throughput(bytes: u64, secs: f64) -> f64 {
@@ -2906,6 +3017,8 @@ pub fn run() {
             extract_embedded_archive,
             benchmark_compression,
             abort_task,
+            preview_output_path,
+            reveal_output,
             list_archive_content,
             get_embedded_archive_info,
             inspect_path
@@ -3223,7 +3336,7 @@ mod tests {
         assert_eq!(report.output_path, path_to_string(&first_volume));
         assert!(first_volume.exists());
         assert!(second_volume.exists());
-        assert_eq!(report.blake3_hash, None);
+        assert_eq!(report.blake3_hash, Some(calculate_archive_hash(&first_volume, detect_archive_meta(&first_volume).unwrap()).unwrap()));
 
         let volumes = existing_volume_paths(&archive).expect("list split volumes");
         assert!(volumes.len() > 1);
@@ -3784,3 +3897,6 @@ mod tests {
         assert!(err.to_string().contains("终止"));
     }
 }
+
+#[cfg(test)]
+mod regression_tests;

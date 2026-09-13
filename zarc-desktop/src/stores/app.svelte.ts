@@ -11,6 +11,8 @@ export interface AppStatus {
 }
 
 class AppStore {
+  sfxError = $state<string | null>(null);
+  supportsSfx = /Windows/i.test(navigator.userAgent);
   currentView = $state<ViewId>('compress');
   sfxInfo = $state<EmbeddedArchiveInfo | null>(null);
   status = $state<AppStatus>({ message: t('status.ready'), level: 'idle' });
@@ -38,7 +40,7 @@ class AppStore {
   #inspectSeq = 0;
 
   get isSfx(): boolean {
-    return this.sfxInfo !== null;
+    return this.sfxInfo !== null || this.sfxError !== null;
   }
 
   setView(view: ViewId): void {
@@ -74,10 +76,12 @@ class AppStore {
   async #measureCompressSource(path: string): Promise<PathInfo | null> {
     const seq = ++this.#inspectSeq;
     if (!path) {
+      void api.inspectPath('').catch(() => {});
       this.compressInfo = null;
       this.compressInfoLoading = false;
       return null;
     }
+    this.compressInfo = null;
     this.compressInfoLoading = true;
     try {
       const info = await api.inspectPath(path);
@@ -101,13 +105,15 @@ class AppStore {
   async initSfx(): Promise<void> {
     try {
       const info = await api.getEmbeddedInfo();
+      this.sfxError = null;
       if (!info) return;
       this.sfxInfo = info;
       this.decompressSource = info.hostPath;
       this.setView('decompress');
       this.setStatus(t('status.sfxMode'), 'success');
     } catch (error) {
-      console.error('Failed to detect embedded archive mode', error);
+      this.sfxError = String(error);
+      this.setStatus(t('audit.sfxError'), 'error');
     }
   }
 }

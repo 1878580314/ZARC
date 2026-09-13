@@ -1,3 +1,4 @@
+import { audit } from './audit';
 import { common } from './common';
 import { compress } from './compress';
 import { decompress } from './decompress';
@@ -20,4 +21,4 @@ function merge(...slices: DictSlice[]): Record<'zh' | 'en', DictTable> {
   };
 }
 
-export const DICT = merge(common, compress, decompress, benchmark, shell, ui, stores);
+export const DICT = merge(audit, common, compress, decompress, benchmark, shell, ui, stores);

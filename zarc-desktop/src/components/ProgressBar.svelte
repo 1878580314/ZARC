@@ -15,7 +15,7 @@
 
   let running = $derived(progress.label || label || t('shell.processing'));
   let statusText = $derived(
-    progress.done ? (progress.error ? t('taskFailed') : t('taskComplete')) : running
+    progress.done ? (progress.error ? t('taskFailed') : t('taskComplete')) : progress.phase !== 'processing' ? t(`audit.phase.${progress.phase}`) : running
   );
   // progress.percent 入库时已在 store 内 clamp 到 0–100，此处不再重复钳制。
   // progress.percent is already clamped to 0–100 on write in the store.
@@ -28,7 +28,7 @@
    * backend. Show an indeterminate back-and-forth bar rather than a dead
    * bar stuck at 0%.
    */
-  let indeterminate = $derived(!progress.done && (!progress.started || progress.totalBytes === 0));
+  let indeterminate = $derived(!progress.done && (!progress.started || progress.totalBytes === 0 || progress.phase !== 'processing'));
 
   let barTone = $derived(
     progress.error ? 'bg-danger' : progress.done ? 'bg-success' : 'bg-accent'
@@ -56,7 +56,7 @@
 
   <div class="relative h-1.5 w-full overflow-hidden rounded-pill bg-inset-strong">
     {#if indeterminate}
-      <div class="absolute inset-y-0 animate-[var(--animate-indeterminate)] rounded-pill bg-accent"></div>
+      <div class="absolute inset-y-0 left-0 w-1/3 animate-[var(--animate-indeterminate)] rounded-pill bg-accent"></div>
     {:else}
       <div
         class="absolute inset-y-0 left-0 overflow-hidden rounded-pill transition-[width] duration-300 ease-out {barTone}"

@@ -7,6 +7,7 @@
   import { api, pickPath, type OperationReport, type OutputKind } from '../lib/api';
   import { emptyToNull, formatBytes, formatCount, pathBaseName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
+  import OutputPreview from './OutputPreview.svelte';
   import Card from './ui/Card.svelte';
   import Button from './ui/Button.svelte';
   import Field from './ui/Field.svelte';
@@ -71,7 +72,7 @@
       icon: 'app',
       hint: t('compress.output.sfx.hint')
     }
-  ]);
+  ].filter((option) => app.supportsSfx || option.value !== 'sfxExe') as SegmentOption<OutputKind>[]);
 
   let levelMarks = $derived([
     { at: 1, label: t('compress.level.fastest') },
@@ -113,7 +114,7 @@
       title: t('compress.dialog.outputTitle'),
       filters: isSfx
         ? [{ name: t('compress.filter.sfx'), extensions: ['exe'] }]
-        : [{ name: t('compress.filter.archive'), extensions: ['zst', 'enc'] }]
+        : [{ name: t('compress.filter.archive'), extensions: [kind === 'folder' ? (encrypt ? 'tar.zst.enc' : 'tar.zst') : (encrypt ? 'zst.enc' : 'zst')] }]
     });
     if (typeof selected === 'string') output = selected;
   }
@@ -145,6 +146,7 @@
         deleteSourceAfter,
         threads: threads > 0 ? threads : null
       });
+      password = '';
       app.setStatus(t('compress.status.done', { path: report.outputPath }), 'success');
     });
 
@@ -166,7 +168,7 @@
     {/snippet}
 
     <div class="flex flex-col gap-4">
-      <Field error={sourceError}>
+      <Field label={t('compress.sourceCard.title')} error={sourceError}>
         {#snippet aside()}
           {#if app.compressInfoLoading}
             {t('compress.measuring')}
@@ -204,6 +206,8 @@
       </Field>
     </div>
   </Card>
+
+  <OutputPreview {source} {output} encrypted={encrypt} {outputKind} splitSizeMib={splitSize} />
 
   <Card title={t('compress.settingsCard.title')} subtitle={t('compress.settingsCard.subtitle')} icon="sliders">
     <div class="flex flex-col gap-5">

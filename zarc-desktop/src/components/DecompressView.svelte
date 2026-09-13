@@ -7,6 +7,7 @@
   import { api, pickPath, type ArchiveContentReport, type OperationReport } from '../lib/api';
   import { emptyToNull, formatBytes, pathBaseName, sidecarName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
+  import OutputPreview from './OutputPreview.svelte';
   import Card from './ui/Card.svelte';
   import Button from './ui/Button.svelte';
   import Field from './ui/Field.svelte';
@@ -22,6 +23,7 @@
   let output = $state('');
   let report = $state<OperationReport | null>(null);
   let browserReport = $state<ArchiveContentReport | null>(null);
+  let listedSource = $state('');
   let touched = $state(false);
   /** 预览与解压共用同一槽位；此标志区分「读取列表」与真实解压。 / Preview and extraction share the decompress slot; this flag tells "reading the list" apart from a real extraction. */
   let previewing = $state(false);
@@ -44,11 +46,15 @@
 
   $effect(() => registerPrimaryAction('decompress', submit));
 
+  $effect(() => {
+    if (source !== listedSource) browserReport = null;
+  });
+
   async function pickSource(): Promise<void> {
     const selected = await pickPath({
       title: t('decompress.dialog.pickArchive'),
       filters: [
-        { name: t('decompress.filter.zarc'), extensions: ['zst', 'enc', 'exe'] },
+        { name: t('decompress.filter.zarc'), extensions: ['zst', 'enc', '001'] },
         { name: t('decompress.filter.all'), extensions: ['*'] }
       ]
     });
@@ -69,13 +75,17 @@
       app.setStatus(t('decompress.error.archiveRequired'), 'error');
       return;
     }
+    const requestedSource = source;
+    const requestedPassword = password;
     previewing = true;
     try {
       const ok = await task.run('decompress', t('decompress.running.list'), async () => {
         const listed = await api.listContent({
-          archivePath: source,
-          password: emptyToNull(password)
+          archivePath: requestedSource,
+          password: emptyToNull(requestedPassword)
         });
+        if (source !== requestedSource || password !== requestedPassword) return;
+        listedSource = requestedSource;
         browserReport = listed;
         app.setStatus(t('decompress.status.listed', { count: listed.totalFiles }), 'success');
       });
@@ -98,6 +108,7 @@
       toasts.warn(t('decompress.toast.noOutput'), t('decompress.hint.noOutput'));
       return;
     }
+    if (isSfx && app.sfxInfo && !app.sfxInfo.payloadReady) await app.initSfx();
     if (isSfx && app.sfxInfo && !app.sfxInfo.payloadReady) {
       const name = sidecarName(app.sfxInfo.hostPath);
       app.setStatus(t('shell.sfx.payloadMissingTag'), 'error');
@@ -116,6 +127,7 @@
             outputPath: emptyToNull(output),
             password: emptyToNull(password)
           });
+      password = '';
       app.setStatus(t('decompress.status.done', { path: report.outputPath }), 'success');
     });
 
@@ -197,7 +209,7 @@
         <Button
           icon="play"
           loading={running && !previewing}
-          disabled={(busy && !running) || (isSfx && app.sfxInfo !== null && !app.sfxInfo.payloadReady)}
+          disabled={busy && !running}
           onclick={submit}
         >
           {t('decompress.submit')}
@@ -217,6 +229,8 @@
     </div>
   </Card>
 
+  {#if !isSfx}<OutputPreview {source} {output} decompress />{/if}
+
   <!-- 自解压模式没有侧边任务中心，进度在此内联显示。 / Self-extracting mode has no sidebar task hub, so progress is shown inline here. -->
   {#if isSfx && progress.decompress.visible}
     <div class="panel rounded-panel px-5 py-4">
@@ -225,7 +239,7 @@
   {/if}
 
   {#if browserReport}
-    <ArchiveBrowser report={browserReport} onClose={() => (browserReport = null)} />
+    {#key browserReport}<ArchiveBrowser report={browserReport} onClose={() => (browserReport = null)} />{/key}
   {/if}
 
   {#if report}

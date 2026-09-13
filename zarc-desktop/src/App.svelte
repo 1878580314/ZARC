@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { fly } from 'svelte/transition';
   import { theme } from './stores/theme.svelte';
   import { app } from './stores/app.svelte';
   import { initProgressListener } from './lib/progress';
   import { initDragDrop } from './lib/dragdrop.svelte';
+  import { t } from './lib/i18n/index.svelte';
   import { initShortcuts } from './lib/shortcuts';
   import Sidebar from './components/Sidebar.svelte';
   import TopBar from './components/TopBar.svelte';
@@ -22,6 +22,7 @@
 
   $effect(() => {
     document.documentElement.setAttribute('data-theme', theme.current);
+    document.documentElement.setAttribute('data-effects', theme.reducedEffects ? 'reduced' : 'full');
   });
 
   onMount(() => {
@@ -84,18 +85,17 @@
       {/if}
 
       <div class="mx-auto w-full max-w-3xl flex-1 pb-6">
-        <!-- key 块在视图切换时产生轻微的水平位移，让过渡带方向感。 / The key block adds a slight horizontal shift on view switches, giving the transition a sense of direction. -->
-        {#key view}
-          <div in:fly={{ x: 12, duration: 220, opacity: 0 }}>
-            {#if view === 'decompress'}
-              <DecompressView />
-            {:else if view === 'compress'}
-              <CompressView />
-            {:else}
-              <BenchmarkView />
-            {/if}
+        {#if app.sfxError}
+          <div class="panel flex flex-col gap-4 rounded-panel p-6" role="alert">
+            <h2 class="text-lg font-bold text-danger">{t('audit.sfxError')}</h2>
+            <p class="break-words text-sm text-fg-soft" data-selectable>{app.sfxError}</p>
+            <button class="control" onclick={() => app.initSfx()}>{t('audit.retry')}</button>
           </div>
-        {/key}
+        {:else}
+          <div hidden={view !== 'compress'}><CompressView /></div>
+          <div hidden={view !== 'decompress'}><DecompressView /></div>
+          <div hidden={view !== 'benchmark'}><BenchmarkView /></div>
+        {/if}
       </div>
     </main>
 

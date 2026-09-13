@@ -2,6 +2,7 @@ import type { ProgressKind, ProgressPayload } from '../lib/api';
 import { translateBackendText } from '../lib/i18n/backend';
 
 export interface TaskProgress {
+  phase: string;
   percent: number;
   processedBytes: number;
   totalBytes: number;
@@ -18,6 +19,7 @@ export interface TaskProgress {
 
 function emptyProgress(): TaskProgress {
   return {
+    phase: 'processing',
     percent: 0,
     processedBytes: 0,
     totalBytes: 0,
@@ -46,6 +48,7 @@ class ProgressStore {
     if (!isTracked(payload.operation)) return;
 
     const slot = this[payload.operation];
+    slot.phase = payload.phase || 'processing';
     slot.percent = Math.max(0, Math.min(payload.percent, 100));
     slot.processedBytes = payload.processedBytes;
     slot.totalBytes = payload.totalBytes;

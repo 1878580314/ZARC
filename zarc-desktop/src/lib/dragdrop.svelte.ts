@@ -1,4 +1,5 @@
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { api } from './api';
 import { app } from '../stores/app.svelte';
 import { toasts } from '../stores/toast.svelte';
 import { isArchivePath, pathBaseName, type PathKind } from './format';
@@ -18,11 +19,13 @@ function guessKind(path: string): PathKind {
   return pathBaseName(path).includes('.') ? 'file' : 'folder';
 }
 
+let routeSequence = 0;
 async function route(path: string): Promise<void> {
-  // setCompressSource 内已做过一次 inspect，直接复用其结果做路由，不再单独调一次 IPC。
-  // setCompressSource already inspects once; reuse its result for routing instead of a second IPC.
-  const info = await app.setCompressSource(path, guessKind(path));
-  const kind: PathKind = info && info.exists ? (info.isDir ? 'folder' : 'file') : guessKind(path);
+  const sequence = ++routeSequence;
+  const info = await api.inspectPath(path, false).catch(() => null);
+  if (sequence !== routeSequence) return;
+  const kind: PathKind = info?.exists ? (info.isDir ? 'folder' : 'file') : guessKind(path);
+  void app.setCompressSource(path, kind);
   const name = pathBaseName(path);
   const kindLabel = t(kind === 'folder' ? 'kind.folder' : 'kind.file');
 

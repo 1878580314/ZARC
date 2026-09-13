@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fieldContext } from './field';
+  const field = fieldContext();
   import { clamp } from '../../lib/format';
   import { t } from '../../lib/i18n/index.svelte';
 
@@ -62,7 +64,9 @@
 
 <div class="relative flex items-stretch">
   <input
-    {id}
+    id={id ?? field?.id}
+    aria-describedby={field?.description()}
+    aria-invalid={field?.invalid()}
     type="text"
     inputmode="numeric"
     value={draft}

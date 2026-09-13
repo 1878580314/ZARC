@@ -63,7 +63,10 @@ class TaskStore {
   requestAbort(): void {
     if (!this.busy || this.aborting) return;
     this.#abortRequested = true;
-    void api.abort();
+    void api.abort().catch((error) => {
+      this.#abortRequested = false;
+      toasts.error(t('audit.abortFailed'), normalizeError(error));
+    });
     app.setStatus(t('status.stoppingTask'), 'busy');
   }
 }

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fieldContext } from './field';
+  const field = fieldContext();
   import Icon from './Icon.svelte';
   import { passwordStrength } from '../../lib/format';
   import { t } from '../../lib/i18n/index.svelte';
@@ -45,7 +47,9 @@
       <Icon name="shield" size={16} />
     </span>
     <input
-      {id}
+      id={id ?? field?.id}
+    aria-describedby={field?.description()}
+    aria-invalid={field?.invalid()}
       type={revealed ? 'text' : 'password'}
       bind:value
       {placeholder}

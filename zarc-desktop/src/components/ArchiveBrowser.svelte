@@ -37,37 +37,39 @@
     for (const entry of report.entries) {
       if (entry.isDir) continue;
       if (!entry.path.toLowerCase().includes(needle)) continue;
-      rows.push({ key: entry.path, name: entry.path, size: entry.size, isDir: false, files: 1 });
+      rows.push({ key: `${rows.length}:${entry.path}`, name: entry.path, size: entry.size, isDir: false, files: 1 });
       if (rows.length >= 500) break;
     }
     return rows;
   });
 
-  let browseRows = $derived.by<Row[]>(() => {
-    const items = new Map<string, Row>();
+  let directoryIndex = $derived.by(() => {
+    const directories = new Map<string, Map<string, Row>>();
     for (const entry of report.entries) {
-      if (!entry.path.startsWith(currentPath)) continue;
-      const relPath = entry.path.slice(currentPath.length);
-      if (relPath === '') continue;
-      const parts = relPath.split('/');
-      const name = parts[0];
-      const isDir = parts.length > 1 || entry.isDir;
-      const existing = items.get(name);
-      if (existing) {
-        existing.size += entry.size;
-        if (isDir) existing.isDir = true;
-        if (!entry.isDir) existing.files += 1;
-      } else {
-        items.set(name, { key: name, name, size: entry.size, isDir, files: entry.isDir ? 0 : 1 });
+      const parts = entry.path.replaceAll('\\', '/').split('/').filter((p) => p && p !== '.');
+      let parent = '';
+      for (let i = 0; i < parts.length; i++) {
+        const name = parts[i];
+        const isDir = i < parts.length - 1 || entry.isDir;
+        let items = directories.get(parent);
+        if (!items) { items = new Map(); directories.set(parent, items); }
+        const existing = items.get(name);
+        if (existing) {
+          existing.size += entry.size;
+          existing.files += entry.isDir ? 0 : 1;
+          existing.isDir ||= isDir;
+        } else items.set(name, { key: parent + name, name, size: entry.size, isDir, files: entry.isDir ? 0 : 1 });
+        parent += name + '/';
       }
     }
-    return Array.from(items.values()).sort((a, b) => {
-      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
+    return new Map([...directories].map(([path, items]) => [path, [...items.values()].sort((a, b) =>
+      a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name))]));
   });
-
+  let browseRows = $derived(directoryIndex.get(currentPath) ?? []);
+  let page = $state(0);
+  $effect(() => { currentPath; query; report; page = 0; });
   let rows = $derived(searching ? searchRows : browseRows);
+  let visibleRows = $derived(rows.slice(page * 100, (page + 1) * 100));
   let truncated = $derived(searching && searchRows.length >= 500);
 
   let crumbs = $derived.by<{ label: string; path: string }[]>(() => {
@@ -187,6 +189,13 @@
       </nav>
     {/if}
 
+    {#if rows.length > 100}
+      <div class="flex items-center justify-between text-xs text-fg-soft">
+        <Button size="sm" variant="subtle" disabled={page === 0} onclick={() => page--}>{t('audit.previous')}</Button>
+        <span>{page + 1} / {Math.ceil(rows.length / 100)}</span>
+        <Button size="sm" variant="subtle" disabled={(page + 1) * 100 >= rows.length} onclick={() => page++}>{t('audit.next')}</Button>
+      </div>
+    {/if}
     <div class="max-h-80 overflow-y-auto rounded-control bg-inset p-1">
       {#if !searching && currentPath}
         <button
@@ -205,7 +214,7 @@
         </p>
       {:else}
         <ul class="flex flex-col">
-          {#each rows as row (row.key)}
+          {#each visibleRows as row (row.key)}
             <li>
               <!-- 文件夹可点击，文件不可：不同标签避免静态行承载按钮语义。 / Folders are clickable, files are not: different tags keep button semantics off static rows. -->
               {#if row.isDir}

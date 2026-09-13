@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fieldContext } from './field';
+  const field = fieldContext();
   import type { Snippet } from 'svelte';
   import Icon, { type IconName } from './Icon.svelte';
   import { t } from '../../lib/i18n/index.svelte';
@@ -62,6 +64,8 @@
       dialog worked. Now it is read-only only when readonly is explicitly passed.
     -->
     <input
+      id={field?.id}
+      aria-describedby={field?.description()}
       type="text"
       bind:value
       {placeholder}
@@ -69,7 +73,7 @@
       {readonly}
       spellcheck="false"
       autocomplete="off"
-      aria-invalid={invalid}
+      aria-invalid={invalid || field?.invalid()}
       onblur={() => onCommit?.(value)}
       onkeydown={(e) => {
         if (e.key === 'Enter') onCommit?.(value);

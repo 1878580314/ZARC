@@ -27,7 +27,7 @@
   };
 </script>
 
-<header class="flex items-start justify-between gap-6 px-1">
+<header class="flex items-start justify-between gap-3 px-1">
   <div class="min-w-0">
     <h1 class="text-[1.35rem] leading-tight font-extrabold tracking-tight text-fg">{title}</h1>
     <p class="mt-1 text-xs text-fg-faint">{subtitle}</p>
@@ -35,7 +35,7 @@
 
   <div class="flex shrink-0 items-center gap-2">
     <div
-      class="panel flex max-w-[22rem] items-center gap-2 rounded-pill px-3 py-1.5 text-xs font-medium {tone[
+      class="panel flex max-w-[14rem] items-center gap-2 rounded-pill px-3 py-1.5 text-xs font-medium {tone[
         status.level
       ]}"
       role="status"
@@ -48,6 +48,11 @@
       {/if}
       <span class="truncate" title={status.message}>{status.message}</span>
     </div>
+
+    <button type="button" onclick={() => theme.toggleEffects()} aria-pressed={theme.reducedEffects}
+      class="panel h-8 rounded-pill px-3 text-xs text-fg-soft" title={t('audit.effectsHint')}>
+      {t(theme.reducedEffects ? 'audit.effectsReduced' : 'audit.effectsFull')}
+    </button>
 
     <!-- 语言切换与主题切换同处一行，角落保持单一控制行。 / Language toggle lives next to the theme toggle so the corner stays one control row. -->
     <button

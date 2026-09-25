@@ -101,7 +101,6 @@
       >
         {task.aborting ? t('task.stopping') : t('task.stop')}
       </Button>
-      <p class="mt-2 text-center text-[0.65rem] text-fg-faint">{t('shell.escToAbort')}</p>
     </div>
   {/if}
 

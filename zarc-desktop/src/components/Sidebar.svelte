@@ -8,11 +8,11 @@
   import Spinner from './ui/Spinner.svelte';
 
   let navItems = $derived<
-    { id: ViewId; label: string; hint: string; icon: IconName; key: string }[]
+    { id: ViewId; label: string; hint: string; icon: IconName }[]
   >([
-    { id: 'compress', label: t('nav.compress'), hint: t('shell.nav.compress.hint'), icon: 'compress', key: '1' },
-    { id: 'decompress', label: t('nav.extract'), hint: t('shell.nav.decompress.hint'), icon: 'decompress', key: '2' },
-    { id: 'benchmark', label: t('nav.benchmark'), hint: t('shell.nav.benchmark.hint'), icon: 'benchmark', key: '3' }
+    { id: 'compress', label: t('nav.compress'), hint: t('shell.nav.compress.hint'), icon: 'compress' },
+    { id: 'decompress', label: t('nav.extract'), hint: t('shell.nav.decompress.hint'), icon: 'decompress' },
+    { id: 'benchmark', label: t('nav.benchmark'), hint: t('shell.nav.benchmark.hint'), icon: 'benchmark' }
   ]);
 
   let current = $derived(app.currentView);
@@ -39,7 +39,7 @@
         type="button"
         aria-current={active ? 'page' : undefined}
         onclick={() => app.setView(item.id)}
-        title="{item.hint} (Ctrl+{item.key})"
+        title={item.hint}
         class="group relative flex items-center gap-2.5 rounded-control px-2.5 py-2 text-sm transition-colors duration-200 {active
           ? 'bg-accent-wash text-accent'
           : 'text-fg-soft hover:bg-inset hover:text-fg'}"
@@ -59,11 +59,6 @@
 
         <span class="flex-1 text-left font-medium">{item.label}</span>
 
-        <kbd
-          class="rounded border border-line px-1 text-[0.6rem] text-fg-faint opacity-0 transition-opacity group-hover:opacity-100"
-        >
-          {item.key}
-        </kbd>
       </button>
     {/each}
   </nav>
@@ -71,26 +66,14 @@
   <div class="mt-auto flex flex-col gap-1 border-t border-line pt-3">
     <button
       type="button"
-      onclick={() => (app.shortcutsOpen = true)}
-      title={t('shell.shortcutsButton')}
-      class="flex items-center gap-2.5 rounded-control px-2.5 py-2 text-sm text-fg-soft transition-colors hover:bg-inset hover:text-fg"
-    >
-      <Icon name="sliders" size={17} />
-      <span class="flex-1 text-left font-medium">{t('shell.nav.shortcuts')}</span>
-      <kbd class="rounded border border-line px-1 text-[0.6rem] text-fg-faint">/</kbd>
-    </button>
-
-    <button
-      type="button"
       onclick={() => theme.toggle()}
-      title={t('shell.themeShortcut')}
+      title={t('shell.themeToggle')}
       class="flex items-center gap-2.5 rounded-control px-2.5 py-2 text-sm text-fg-soft transition-colors hover:bg-inset hover:text-fg"
     >
       <Icon name={theme.current === 'dark' ? 'moon' : 'sun'} size={17} />
       <span class="flex-1 text-left font-medium">
         {theme.current === 'dark' ? t('shell.theme.dark') : t('shell.theme.light')}
       </span>
-      <kbd class="rounded border border-line px-1 text-[0.6rem] text-fg-faint">D</kbd>
     </button>
   </div>
 </aside>

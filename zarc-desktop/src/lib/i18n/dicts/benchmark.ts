@@ -1,7 +1,6 @@
 export const benchmark: { zh: Record<string, string>; en: Record<string, string> } = {
   zh: {
     'benchmark.settingsCard.title': '测试设置',
-    'benchmark.settingsCard.subtitle': '在样本上逐级试跑，找出速度与体积的平衡点',
     'benchmark.source': '测试源',
     'benchmark.sourcePlaceholder': '挑一个有代表性的文件或目录',
     'benchmark.minLevel': '最低等级',
@@ -13,7 +12,7 @@ export const benchmark: { zh: Record<string, string>; en: Record<string, string>
     'benchmark.threads': '工作线程',
     'benchmark.threadsHint': '0 表示使用全部可用核心；固定线程数便于横向对比。',
     'benchmark.threadsSuffix': '线程',
-    'benchmark.runsInfo': '共需 {runs} 次压缩，高等级耗时会显著拉长；测试期间只读取样本，不写入磁盘。',
+    'benchmark.runsInfo': '共需 {runs} 次压缩，高等级耗时会显著拉长。',
     'benchmark.submit': '开始测试',
     'benchmark.resultsCard.title': '测试结果',
     'benchmark.useLevel': '采用 L{level}',
@@ -35,7 +34,6 @@ export const benchmark: { zh: Record<string, string>; en: Record<string, string>
   },
   en: {
     'benchmark.settingsCard.title': 'Benchmark settings',
-    'benchmark.settingsCard.subtitle': 'Test-runs each level on a sample to find the speed/size balance',
     'benchmark.source': 'Benchmark source',
     'benchmark.sourcePlaceholder': 'Pick a representative file or folder',
     'benchmark.minLevel': 'Minimum level',
@@ -47,7 +45,7 @@ export const benchmark: { zh: Record<string, string>; en: Record<string, string>
     'benchmark.threads': 'Worker threads',
     'benchmark.threadsHint': '0 uses all available cores; a fixed count makes comparisons easier.',
     'benchmark.threadsSuffix': 'threads',
-    'benchmark.runsInfo': 'A total of {runs} compression runs; high levels take significantly longer. Only the sample is read - nothing is written to disk.',
+    'benchmark.runsInfo': 'A total of {runs} compression runs; high levels take significantly longer.',
     'benchmark.submit': 'Run benchmark',
     'benchmark.resultsCard.title': 'Benchmark results',
     'benchmark.useLevel': 'Use L{level}',

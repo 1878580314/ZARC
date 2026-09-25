@@ -406,14 +406,3 @@
     display: none;
   }
 }
-
-[data-effects="reduced"] .aurora { display: none; }
-[data-effects="reduced"] .panel {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: var(--zarc-panel-solid);
-}
-[data-effects="reduced"] *, [data-effects="reduced"] *::after {
-  animation: none !important;
-  transition-duration: 0.01ms !important;
-}

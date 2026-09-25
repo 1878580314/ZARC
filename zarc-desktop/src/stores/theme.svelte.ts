@@ -3,13 +3,6 @@ export type ThemeMode = 'dark' | 'light';
 const STORAGE_KEY = 'theme';
 
 class ThemeStore {
-  reducedEffects = $state(localStorage.getItem('zarc.reducedEffects') === 'true');
-
-  toggleEffects(): void {
-    this.reducedEffects = !this.reducedEffects;
-    localStorage.setItem('zarc.reducedEffects', String(this.reducedEffects));
-  }
-
   current = $state<ThemeMode>('dark');
   /** 跟随系统直至用户手动选择主题；此后固定。外部只读 current 即可。
    *  Follows the system until the user picks a theme manually; from then on it sticks. */

@@ -5,14 +5,12 @@
   import { initProgressListener } from './lib/progress';
   import { initDragDrop } from './lib/dragdrop.svelte';
   import { t } from './lib/i18n/index.svelte';
-  import { initShortcuts } from './lib/shortcuts';
   import Sidebar from './components/Sidebar.svelte';
   import TopBar from './components/TopBar.svelte';
   import TaskHub from './components/TaskHub.svelte';
   import TaskStrip from './components/TaskStrip.svelte';
   import MasterDropZone from './components/MasterDropZone.svelte';
   import ToastHost from './components/ToastHost.svelte';
-  import ShortcutsDialog from './components/ShortcutsDialog.svelte';
   import CompressView from './components/CompressView.svelte';
   import DecompressView from './components/DecompressView.svelte';
   import BenchmarkView from './components/BenchmarkView.svelte';
@@ -22,11 +20,10 @@
 
   $effect(() => {
     document.documentElement.setAttribute('data-theme', theme.current);
-    document.documentElement.setAttribute('data-effects', theme.reducedEffects ? 'reduced' : 'full');
   });
 
   onMount(() => {
-    const cleanups: (() => void)[] = [theme.init(), initShortcuts()];
+    const cleanups: (() => void)[] = [theme.init()];
     let disposed = false;
 
     /**
@@ -105,6 +102,5 @@
   </div>
 
   <MasterDropZone />
-  <ShortcutsDialog />
   <ToastHost />
 </div>

@@ -3,7 +3,6 @@
   import { task } from '../stores/task.svelte';
   import { progress } from '../stores/progress.svelte';
   import { toasts } from '../stores/toast.svelte';
-  import { registerPrimaryAction } from '../lib/shortcuts';
   import { api, pickPath, type ArchiveContentReport, type OperationReport } from '../lib/api';
   import { emptyToNull, formatBytes, pathBaseName, sidecarName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
@@ -43,8 +42,6 @@
       ? t('decompress.outputPlaceholder.sfx', { name: app.sfxInfo.defaultExtractName })
       : t('decompress.outputPlaceholder.default')
   );
-
-  $effect(() => registerPrimaryAction('decompress', submit));
 
   $effect(() => {
     if (source !== listedSource) browserReport = null;

@@ -2,7 +2,6 @@
   import { app } from '../stores/app.svelte';
   import { task } from '../stores/task.svelte';
   import { toasts } from '../stores/toast.svelte';
-  import { registerPrimaryAction } from '../lib/shortcuts';
   import { api, pickPath, type BenchmarkReport } from '../lib/api';
   import { formatBytes, formatDuration, pathBaseName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
@@ -51,8 +50,6 @@
       ? Math.max(...report.results.map((r) => r.ratioPercent))
       : 0
   );
-
-  $effect(() => registerPrimaryAction('benchmark', submit));
 
   async function pickFile(): Promise<void> {
     const selected = await pickPath({ title: t('benchmark.dialog.pickFile') });
@@ -106,7 +103,7 @@
 </script>
 
 <div class="flex flex-col gap-4 animate-[var(--animate-rise)]">
-  <Card title={t('benchmark.settingsCard.title')} subtitle={t('benchmark.settingsCard.subtitle')} icon="benchmark">
+  <Card title={t('benchmark.settingsCard.title')} icon="benchmark">
     {#snippet actions()}
       <Tag tone={source ? 'accent' : 'neutral'}>{source ? t(kind === 'folder' ? 'kind.folder' : 'kind.file') : t('notSelected')}</Tag>
     {/snippet}

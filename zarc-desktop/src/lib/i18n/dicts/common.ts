@@ -21,7 +21,7 @@ export const common: { zh: Record<string, string>; en: Record<string, string> } 
     'toast.extractionComplete': '解压完成',
     'toast.benchmarkComplete': '测试完成',
     'toast.noSource': '还没有选择源路径',
-    'toast.noArchive': '还没有选择归档',
+    'toast.noArchive': '还没有选择压缩包',
     'toast.onePathOnly': '一次只能处理一个路径',
     'time.sec': '秒',
     'time.min': '分',
@@ -38,7 +38,7 @@ export const common: { zh: Record<string, string>; en: Record<string, string> } 
     'field.totalFiles': '文件总数',
     'field.uncompressedSize': '解压后体积',
     'pw.notSet': '未设置',
-    'pw.hint.notSet': '加密归档必须设置密码。',
+    'pw.hint.notSet': '加密压缩包必须设置密码。',
     'pw.veryWeak': '很弱',
     'pw.hint.veryWeak': '至少 8 位，并混合大小写、数字与符号。',
     'pw.weak': '较弱',
@@ -48,7 +48,7 @@ export const common: { zh: Record<string, string>; en: Record<string, string> } 
     'pw.strong': '较强',
     'pw.hint.strong': '已足够日常使用。',
     'pw.veryStrong': '很强',
-    'pw.hint.veryStrong': '密码遗失后归档无法恢复，请妥善保存。',
+    'pw.hint.veryStrong': '密码遗失后压缩包无法恢复，请妥善保存。',
     'error.unknown': '发生未知错误。'
   },
   en: {

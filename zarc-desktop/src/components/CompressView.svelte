@@ -3,7 +3,6 @@
   import { app } from '../stores/app.svelte';
   import { task } from '../stores/task.svelte';
   import { toasts } from '../stores/toast.svelte';
-  import { registerPrimaryAction } from '../lib/shortcuts';
   import { api, pickPath, type OperationReport, type OutputKind } from '../lib/api';
   import { emptyToNull, formatBytes, formatCount, pathBaseName } from '../lib/format';
   import { t } from '../lib/i18n/index.svelte';
@@ -26,7 +25,7 @@
   let splitSize = $state(0);
   /** 0 表示由后端按核心数决定。 / 0 lets the backend decide based on the core count. */
   let threads = $state(0);
-  let includeRootDir = $state(true);
+  let includeRootDir = $state(false);
   let encrypt = $state(false);
   let password = $state('');
   let enableLogging = $state(false);
@@ -95,9 +94,6 @@
   $effect(() => {
     if (isSfx) splitSize = 0;
   });
-
-  // 让 Ctrl+Enter 在压缩视图触发此主操作。 / Let Ctrl+Enter trigger this primary action on the Compress view.
-  $effect(() => registerPrimaryAction('compress', submit));
 
   async function pickFile(): Promise<void> {
     const selected = await pickPath({ title: t('compress.dialog.pickFile') });
@@ -267,7 +263,6 @@
             <Icon name="chevronRight" size={14} />
           </span>
           {t('compress.advanced')}
-          <span class="ml-auto font-normal text-fg-faint">{t('compress.advancedSummary')}</span>
         </button>
 
         {#if advanced}

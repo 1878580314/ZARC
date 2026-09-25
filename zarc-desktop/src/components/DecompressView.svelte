@@ -139,7 +139,7 @@
 
   <Card
     title={t('decompress.settingsCard.title')}
-    subtitle={isSfx ? t('decompress.settingsCard.subtitle.sfx') : t('decompress.settingsCard.subtitle.default')}
+    subtitle={isSfx ? undefined : t('decompress.settingsCard.subtitle.default')}
     icon="decompress"
   >
     {#snippet actions()}

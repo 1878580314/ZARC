@@ -16,7 +16,6 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
     'shell.view.benchmark.title': '性能测试',
     'shell.view.benchmark.subtitle': '比较不同压缩等级的耗时与结果大小',
     'shell.sfx.modeTitle': '自解压模式',
-    'shell.sfx.modeSubtitle': '这个可执行文件内嵌了压缩包数据，选择输出目录即可释放',
     'shell.taskHub': '任务中心',
     'shell.working': '正在{label}...',
     'shell.running': '运行中',
@@ -51,7 +50,7 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
     'shell.drop.routing': '压缩包（.zst / .enc / .001 / .exe）会进入解压页，其余进入压缩页',
     'shell.drop.multiWarn': '一次只能处理一个路径，将使用第一个。',
     'shell.sfx.title': '这是一个自解压包',
-    'shell.sfx.body': '压缩包数据已内嵌在本程序中，选择输出目录即可释放，无需另外准备 ZARC。',
+    'shell.sfx.body': '压缩包数据已内嵌在本程序中，选择输出目录即可解压',
     'shell.sfx.payloadMissingTag': '数据文件缺失',
     'shell.sfx.payloadMissing':
       '未检测到数据文件 {name}：请将它与本程序放在同一目录，且不要更改其名称。',
@@ -76,7 +75,6 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
     'shell.view.benchmark.title': 'Benchmark',
     'shell.view.benchmark.subtitle': 'Compare compression time and output size across levels',
     'shell.sfx.modeTitle': 'Self-Extracting Mode',
-    'shell.sfx.modeSubtitle': 'This executable has archive data embedded in it; pick an output folder to extract',
     'shell.taskHub': 'Task Hub',
     'shell.working': '{label} in progress...',
     'shell.running': 'Running',
@@ -111,7 +109,7 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
     'shell.drop.routing': 'Archives (.zst / .enc / .001 / .exe) go to Extract; everything else goes to Compress',
     'shell.drop.multiWarn': 'Only one path can be handled at a time; the first one will be used.',
     'shell.sfx.title': 'This is a self-extracting package',
-    'shell.sfx.body': 'The archive data is embedded in this executable; pick an output folder to extract it. No separate copy of ZARC is needed.',
+    'shell.sfx.body': 'The archive is embedded in this app. Choose an output folder to extract it.',
     'shell.sfx.payloadMissingTag': 'Data file missing',
     'shell.sfx.payloadMissing':
       'Data file {name} not found: keep it in the same folder as this program and do not rename it.',

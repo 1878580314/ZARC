@@ -1,7 +1,6 @@
 export const decompress: { zh: Record<string, string>; en: Record<string, string> } = {
   zh: {
     'decompress.settingsCard.title': '解压设置',
-    'decompress.settingsCard.subtitle.sfx': '压缩包已内嵌，只需决定放到哪里',
     'decompress.settingsCard.subtitle.default': '选择压缩包并指定输出位置',
     'decompress.tag.passwordRequired': '需要密码',
     'decompress.archiveSource': '压缩包源',
@@ -34,7 +33,6 @@ export const decompress: { zh: Record<string, string>; en: Record<string, string
   },
   en: {
     'decompress.settingsCard.title': 'Extraction settings',
-    'decompress.settingsCard.subtitle.sfx': 'The archive is embedded; just pick where it goes',
     'decompress.settingsCard.subtitle.default': 'Pick an archive and an output location',
     'decompress.tag.passwordRequired': 'Password required',
     'decompress.archiveSource': 'Archive source',

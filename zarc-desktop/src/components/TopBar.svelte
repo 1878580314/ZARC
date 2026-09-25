@@ -6,15 +6,15 @@
 
   let view = $derived(app.currentView);
   let title = $derived(app.isSfx ? t('shell.sfx.modeTitle') : t(`shell.view.${view}.title`));
-  let subtitle = $derived(
-    app.isSfx ? t('shell.sfx.modeSubtitle') : t(`shell.view.${view}.subtitle`)
-  );
+  let subtitle = $derived(app.isSfx ? null : t(`shell.view.${view}.subtitle`));
 </script>
 
 <header class="flex items-start justify-between gap-3 px-1">
   <div class="min-w-0">
     <h1 class="text-[1.35rem] leading-tight font-extrabold tracking-tight text-fg">{title}</h1>
-    <p class="mt-1 text-xs text-fg-faint">{subtitle}</p>
+    {#if subtitle}
+      <p class="mt-1 text-xs text-fg-faint">{subtitle}</p>
+    {/if}
   </div>
 
   <div class="flex shrink-0 items-center gap-2">

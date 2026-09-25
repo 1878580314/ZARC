@@ -10,7 +10,7 @@ export const audit = {
     "audit.previous": "上一页",
     "audit.next": "下一页",
     "audit.phase.processing": "处理中",
-    "audit.phase.finalizing": "正在完成编码与落盘",
+    "audit.phase.finalizing": "正在保存压缩包",
     "audit.phase.hashing": "正在校验输出",
     "audit.phase.packaging": "正在封装自解压程序",
     "audit.phase.cleanup": "正在清理源文件"
@@ -26,7 +26,7 @@ export const audit = {
     "audit.previous": "Previous",
     "audit.next": "Next",
     "audit.phase.processing": "Processing",
-    "audit.phase.finalizing": "Finishing encoding and syncing",
+    "audit.phase.finalizing": "Saving archive",
     "audit.phase.hashing": "Verifying output",
     "audit.phase.packaging": "Packaging executable",
     "audit.phase.cleanup": "Removing source"

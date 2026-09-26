@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "ZARC",
-  "version": "0.1.3",
-  "identifier": "com.timerain.zarcstudio",
+  "version": "0.1.4",
+  "identifier": "com.zarc.studio",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",

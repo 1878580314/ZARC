@@ -24,7 +24,7 @@
     id
   }: Props = $props();
 
-  // 填充百分比。旧实现是纯灰轨道，看不出位置在区间内的落点。 / Fill percentage. The old implementation was a plain gray track, so you couldn't tell where the position sits within the range.
+  // 填充百分比，让位置在区间内的落点可见。 / Fill percentage so the position within the range is visible.
   let fill = $derived(((value - min) / (max - min)) * 100);
 </script>
 

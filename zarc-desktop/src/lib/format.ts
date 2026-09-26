@@ -56,14 +56,9 @@ export interface ReportField {
 }
 
 /**
- * 将后端报告拆分为结构化字段。
- *
- * 旧实现返回一个以 `\n` 拼接的长字符串并直接塞进 `<pre>`，
- * 既无法正常排版，也无法单独复制路径。
- * Splits the backend report into structured fields.
- *
- * The old implementation returned one long `\n`-joined string dumped into a `<pre>`,
- * which allowed neither proper layout nor copying paths individually.
+ * 将后端报告拆分为结构化字段，使每一项能独立对齐与复制。
+ * Split the backend report into structured fields so each item can be laid
+ * out and copied independently.
  */
 export function operationFields(report: OperationReport): ReportField[] {
   const fields: ReportField[] = [

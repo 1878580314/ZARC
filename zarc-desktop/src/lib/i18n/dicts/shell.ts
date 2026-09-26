@@ -5,7 +5,7 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
     'shell.theme.dark': '深色',
     'shell.theme.light': '浅色',
     'shell.mainNav': '主导航',
-    'shell.tagline': 'zstd 压缩工作台',
+    'shell.tagline': 'zstd 解压缩工具',
     'shell.nav.compress.hint': '打包并加密',
     'shell.nav.decompress.hint': '还原压缩包',
     'shell.nav.benchmark.hint': '选出最佳等级',
@@ -55,6 +55,16 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
     'shell.sfx.payloadMissing':
       '未检测到数据文件 {name}：请将它与本程序放在同一目录，且不要更改其名称。',
     'shell.sfx.encrypted': '已加密',
+    'about.open': '关于',
+    'about.title': '关于 ZARC',
+    'about.version': '版本 {version}',
+    'about.checkUpdate': '检查更新',
+    'about.updateHint': '前往 GitHub 发布页查看最新版本',
+    'about.author': '作者',
+    'about.repository': '源代码仓库',
+    'about.license.title': '使用协议',
+    'about.license.body':
+      '本软件按「现状」免费提供，不附带任何明示或默示的担保。您可以自由地使用、复制与分发本软件，但不得将其用于违反法律法规的用途。因使用本软件而产生的任何直接或间接损失，作者概不负责。本软件不收集、不上传任何用户数据，所有压缩与解压操作均在您的设备本地完成。',
     'shell.toast.copyError': '复制错误信息',
     'shell.toast.close': '关闭通知'
   },
@@ -64,7 +74,7 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
     'shell.theme.dark': 'Dark',
     'shell.theme.light': 'Light',
     'shell.mainNav': 'Main navigation',
-    'shell.tagline': 'zstd compression workbench',
+    'shell.tagline': 'zstd archive tool',
     'shell.nav.compress.hint': 'Package and encrypt',
     'shell.nav.decompress.hint': 'Restore archives',
     'shell.nav.benchmark.hint': 'Find the best level',
@@ -114,6 +124,16 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
     'shell.sfx.payloadMissing':
       'Data file {name} not found: keep it in the same folder as this program and do not rename it.',
     'shell.sfx.encrypted': 'Encrypted',
+    'about.open': 'About',
+    'about.title': 'About ZARC',
+    'about.version': 'Version {version}',
+    'about.checkUpdate': 'Check for updates',
+    'about.updateHint': 'Open the GitHub releases page for the latest version',
+    'about.author': 'Author',
+    'about.repository': 'Source repository',
+    'about.license.title': 'Terms of Use',
+    'about.license.body':
+      'This software is provided free of charge "as is", without warranty of any kind, express or implied. You may use, copy, and distribute it freely, but must not use it for unlawful purposes. The author accepts no liability for any direct or indirect damages arising from its use. The software collects and uploads no user data; all compression and extraction run locally on your device.',
     'shell.toast.copyError': 'Copy error message',
     'shell.toast.close': 'Close notification'
   }

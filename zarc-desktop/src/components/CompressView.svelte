@@ -34,11 +34,9 @@
   let report = $state<OperationReport | null>(null);
   let touched = $state(false);
 
-  // 应用 store 持有数据源的唯一副本。旧实现在此保留本地状态并用 $effect 单向同步，
-  // 文件对话框选择的路径从不写回 store，而拖拽却会覆盖它们。
-  // The app store holds the only copy of the data source. The old implementation
-  // kept a local state here and synced it one-way with $effect, so paths chosen
-  // in file dialogs never wrote back to the store while drag-and-drop overwrote them.
+  // 应用 store 持有数据源的唯一副本，文件对话框与拖拽均写回同一处。
+  // The app store holds the only copy of the data source; file dialogs and
+  // drag-and-drop both write back to it.
   let source = $derived(app.compressSource);
   let kind = $derived(app.compressKind);
   let info = $derived(app.compressInfo);

@@ -47,11 +47,8 @@
   function commit(): void {
     editing = false;
     const parsed = Number.parseInt(draft, 10);
-    // min/max 曾被直接透传给 <input>，而浏览器不拦截程序化的越界值，
-    // 「最低等级 999」会原样直达后端。此处真正做钳制。
-    // min/max used to be passed straight through to <input>, and the browser doesn't
-    // stop programmatic out-of-range values, so "minimum level 999" went to the backend
-    // as-is. Clamp for real here.
+    // 浏览器不拦截程序化的越界值，必须在此显式钳制。
+    // Browsers do not stop programmatic out-of-range values, so clamp explicitly here.
     value = Number.isFinite(parsed) ? clamp(parsed, min, max) : min;
     draft = String(value);
   }

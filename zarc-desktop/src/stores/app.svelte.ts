@@ -31,7 +31,7 @@ class AppStore {
   compressInfoLoading = $state(false);
 
   /** 压缩等级存在 store 中，使基准视图可以一键把推荐值写到此处。 / The compression level lives in the store so the benchmark view can write its recommendation here in one click. */
-  compressLevel = $state(8);
+  compressLevel = $state(3);
 
   /** 递增序号，用于丢弃过期的检查结果，使旧结果在源快速变化时不会覆盖新结果。 / Incrementing sequence number for discarding stale inspect results, so older ones never overwrite newer ones while the source changes rapidly. */
   #inspectSeq = 0;

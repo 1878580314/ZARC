@@ -249,10 +249,9 @@ impl Write for MultiVolumeWriter {
                 self.rotate_volume()?;
             }
 
-            // 必须在分卷切换*之后*重算；若提前读取，新分卷首写会看到 remaining == 0，
-            // 退化为 .max(1)，整个归档变成每系统调用一个字节
-            // Recomputed *after* rotation: reading it earlier made the first write into a
-            // fresh volume see `remaining == 0` and degrade to one byte per syscall.
+            // 必须在分卷切换*之后*重算，否则新分卷首写会看到 remaining == 0。
+            // Must be recomputed *after* rotation, or the first write into a
+            // fresh volume would see `remaining == 0`.
             let remaining_in_vol = self.volume_limit - self.bytes_written_in_volume;
             let take = ((buf.len() - written) as u64).min(remaining_in_vol) as usize;
 
@@ -465,10 +464,9 @@ fn read_archive_listing<R: Read>(
             io::copy(&mut tar.into_inner(), &mut io::sink()).context("验证归档尾部失败")?;
         }
         ArchiveKind::Zst => {
-            // 单文件 .zst 帧内不含名称与大小，只能解码计数；顺带让错误密码在此直接失败
-            // （此前该分支完全忽略密码，误报 size: 0）
-            // A single-file `.zst` frame carries no name/size, so decode and count; a wrong
-            // password now *fails* here instead of being ignored with `size: 0`.
+            // 单文件 .zst 帧内不含名称与大小，只能解码计数；顺带让错误密码在此直接失败。
+            // A single-file `.zst` frame carries no name/size, so decode and count;
+            // this also makes a wrong password fail here.
             let mut decoder = zstd::Decoder::new(reader).context("创建 zstd 解码器失败")?;
             let mut buffer = vec![0_u8; 512 * 1024];
             let mut size = 0_u64;
@@ -1167,11 +1165,9 @@ fn measure_directory(root: &Path, generation: u64) -> (u64, u64, bool) {
 /// 向文件系统查询路径的真实类型。
 /// Ask the filesystem what a path actually is.
 ///
-/// 前端曾用 `basename.includes('.')` 猜测，会把 `release.v2/` 判为文件、`Makefile`
-/// 判为目录，导致错误的 `include_root_dir` 语义。只有 `stat` 能回答这个问题。
-/// The frontend used to guess with `basename.includes('.')`, which labels
-/// `release.v2/` a file and `Makefile` a directory - and then hands the wrong
-/// `include_root_dir` semantics to the backend. Only a `stat` can answer this.
+/// 文件名启发式不可靠（`release.v2/` 是目录、`Makefile` 是文件），只有 `stat` 能回答。
+/// Name heuristics are unreliable (`release.v2/` is a directory, `Makefile` a
+/// file); only a `stat` can answer this.
 #[tauri::command]
 async fn inspect_path(path: String, measure: Option<bool>) -> std::result::Result<PathInfo, String> {
     let measure = measure.unwrap_or(true);
@@ -1304,16 +1300,32 @@ async fn reveal_output(path: String) -> std::result::Result<(), String> {
     }).await.map_err(|e| e.to_string())?.map_err(|e| full_error_chain(&e))
 }
 
-/// 日志落盘句柄，每进程至多打开一次。
-/// Log sink, opened at most once per process.
-///
-/// 旧实现每写一行就重开 `zarc.log`：每条消息一对系统调用，且应用位于只读目录
-/// （`/Applications`、`Program Files`）时静默失效。现在句柄被缓存，exe 目录不可写时回退到临时目录。
-/// The previous implementation re-opened `zarc.log` for every line, so logging
-/// cost a syscall pair per message and silently did nothing whenever the app
-/// lived in a read-only directory (`/Applications`, `Program Files`). Now the
-/// handle is cached and we fall back to the temp dir when the exe directory is
-/// not writable.
+/// 用系统默认浏览器打开外部 https 链接（关于页的检查更新与 GitHub 链接）。
+/// Open an external https link in the system default browser (update check and
+/// GitHub links on the About page).
+#[tauri::command]
+async fn open_url(url: String) -> std::result::Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<()> {
+        let url = url.trim();
+        // 只允许 https：spawn 的参数原样进系统 opener，拒绝 file://、javascript: 等协议。
+        // Only https is allowed: the argument goes straight into the system
+        // opener, so file://, javascript: and friends are rejected.
+        if !url.starts_with("https://") {
+            bail!("仅允许打开 https 链接");
+        }
+        #[cfg(windows)]
+        std::process::Command::new("explorer.exe").arg(url).spawn()?;
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open").arg(url).spawn()?;
+        #[cfg(all(unix, not(target_os = "macos")))]
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        Ok(())
+    }).await.map_err(|e| e.to_string())?.map_err(|e| full_error_chain(&e))
+}
+
+/// 日志落盘句柄，每进程至多打开一次；exe 目录不可写时回退到临时目录。
+/// Log sink, opened at most once per process; falls back to the temp dir when
+/// the exe directory is not writable.
 static LOG_FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
 
 fn log_sink() -> Option<&'static Mutex<File>> {
@@ -1997,9 +2009,8 @@ fn full_error_chain(err: &anyhow::Error) -> String {
     format!("{err:#}")
 }
 
-/// 目录/单文件压缩分发：普通压缩与 SFX 压缩此前各持一份（含参数解析）。
-/// Directory/single-file compress dispatch, previously duplicated between the
-/// plain and SFX compress paths (parameter resolution included).
+/// 目录/单文件压缩分发（含参数解析）。
+/// Directory/single-file compress dispatch, including parameter resolution.
 fn compress_source_to(
     source_is_dir: bool,
     source: &Path,
@@ -2038,10 +2049,8 @@ fn compress_source_to(
     }
 }
 
-/// “压缩后删除源”收尾：普通压缩与 SFX 压缩此前各持一份（且普通版只上报了
-/// 最外层错误，根因链在此统一为完整链）。
-/// "Delete source after compress" epilogue, previously duplicated (the plain
-/// path also reported only the outermost error; both now use the full chain).
+/// “压缩后删除源”收尾，统一上报完整根因链。
+/// "Delete source after compress" epilogue, reporting the full error chain.
 fn maybe_delete_source(
     source: &Path,
     enable_logging: bool,
@@ -2347,10 +2356,9 @@ fn compress_directory(
             continue;
         }
 
-        // 符号链接曾被静默丢弃：下方两个分支都不匹配，目录树经 ZARC 往返后链接消失且无任何警告。
-        // Symlinks used to be dropped silently: neither branch below matched
-        // them, so a directory tree round-tripped through ZARC came back with
-        // its links missing and no warning anywhere.
+        // 符号链接单独成类处理，保留链接语义而非按文件/目录解引用。
+        // Symlinks get their own branch, preserving link semantics instead of
+        // dereferencing them as files or directories.
         if entry.file_type().is_symlink() {
             let access_path = fs_access_path(path)
                 .with_context(|| format!("无法准备符号链接路径: {}", path.display()))?;
@@ -2514,13 +2522,7 @@ fn decompress_file_from_reader<R: Read>(
 static TEMP_STAGING_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// 在 `parent` 下预留一个未占用的 `.zarc-tmp-<pid>-<seq>` 暂存路径。
-///
-/// 旧名字 `.zarc-tmp-<pid>` 被同目录所有并发解压共享，第二个解压会在开始前*删除*第一个的暂存区。
 /// Reserve an unused `.zarc-tmp-<pid>-<seq>` staging path under `parent`.
-///
-/// The old name was `.zarc-tmp-<pid>` — shared by every concurrent extraction in
-/// that directory, and the second one *deleted* the first one's staging area
-/// before starting.
 fn unique_temp_path(parent: &Path) -> Result<PathBuf> {
     let pid = std::process::id();
     for _ in 0..1024 {
@@ -2533,15 +2535,9 @@ fn unique_temp_path(parent: &Path) -> Result<PathBuf> {
     bail!("无法在 {} 下分配临时解压路径", parent.display());
 }
 
-/// Drop 时删除暂存路径，除非被解除武装。
-///
-/// 手写清理活不过 `?`：match 分支里的 `?` 直接返回函数、跳过下方清理代码，每次失败解压都会留下一整棵半解压目录树。
-/// Deletes a staging path on drop unless disarmed.
-///
-/// Hand-rolled cleanup did not survive contact with `?`: a `?` inside a match
-/// arm returned straight out of the function and skipped the cleanup arm
-/// written below it, leaving a full partially-extracted tree behind on every
-/// failed extraction.
+/// Drop 时删除暂存路径，除非被解除武装；由 guard 保证任何 `?` 提前返回都会触发清理。
+/// Deletes a staging path on drop unless disarmed; the guard guarantees that
+/// any early `?` return still triggers cleanup.
 struct TempPathGuard {
     path: PathBuf,
     armed: bool,
@@ -2680,14 +2676,9 @@ fn validate_compress_paths(
     Ok(())
 }
 
-/// 待创建目标已存在时拒绝启动。
-///
-/// `File::create` 原地截断，输出路径敲错曾在压缩一个字节前就毁掉无关文件。解压已有此防护（`validate_decompress_paths`），压缩此前没有。
+/// 待创建目标已存在时拒绝启动。`File::create` 会原地截断，必须先显式检查。
 /// Refuse to start when anything we are about to create already exists.
-///
-/// `File::create` truncates in place, so a mistyped output path used to destroy
-/// an unrelated file before a single byte was compressed. Decompression already
-/// had this guard (`validate_decompress_paths`); compression did not.
+/// `File::create` truncates in place, so check explicitly first.
 fn ensure_output_available(
     output: &Path,
     kind: OutputKind,
@@ -2734,10 +2725,9 @@ fn detect_archive_meta(path: &Path) -> Result<ArchiveMeta> {
         .unwrap_or_default();
 
     // 检查多分卷后缀：与 volume_base_path / volume_indices 共用 is_volume_suffix 语义，
-    // 任意位数的纯数字后缀均视为分卷（此前此处只认严格 3 位，与剥离逻辑分叉）。
+    // 任意位数的纯数字后缀均视为分卷。
     // Multi-volume detection shares `is_volume_suffix` semantics with path
-    // stripping/scanning: any all-digit suffix counts (this check used to
-    // accept exactly 3 digits while stripping accepted more).
+    // stripping/scanning: any all-digit suffix counts.
     let (stem, is_multi) = match name.rsplit_once('.') {
         Some((stem, suffix)) if !stem.is_empty() && is_volume_suffix(suffix) => (stem, true),
         _ => (name.as_str(), false),
@@ -3021,7 +3011,8 @@ pub fn run() {
             reveal_output,
             list_archive_content,
             get_embedded_archive_info,
-            inspect_path
+            inspect_path,
+            open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -3466,10 +3457,9 @@ mod tests {
 
     #[test]
     fn absurd_chunk_length_is_rejected_without_allocating() {
-        // 4 字节长度前缀完全受攻击者控制。边界检查之前，伪造的 `0xFFFFFFFF` 会让 `resize(chunk_len, 0)` 尝试预留 4 GiB 并中止进程。
-        // A 4-byte length prefix is fully attacker-controlled. Before the bound
-        // check, `resize(chunk_len, 0)` on a forged `0xFFFFFFFF` tried to reserve
-        // 4 GiB and aborted the process.
+        // 4 字节长度前缀完全受攻击者控制，必须在分配前校验边界。
+        // A 4-byte length prefix is fully attacker-controlled and must be
+        // bounded before allocation.
         let mut sink = Vec::new();
         {
             let mut writer = EncryptedWriter::new(&mut sink, "pw").expect("writer");
@@ -3573,7 +3563,6 @@ mod tests {
             volumes.len()
         );
 
-        // Picking a middle volume used to fail with "未找到分卷归档首卷".
         let output = temp.path().join("restored.bin");
         decompress_archive_sync(
             DecompressRequest {
@@ -3665,9 +3654,9 @@ mod tests {
 
     #[test]
     fn multi_volume_writer_survives_absurd_volume_size() {
-        // `volume_limit_mib * 1024 * 1024` 曾 u64 溢出回绕成极小上限，把归档碎化；现在饱和为“单个超大分卷”。
-        // `volume_limit_mib * 1024 * 1024` overflowed u64 and wrapped to a tiny
-        // limit, shredding the archive. Now it saturates to "one huge volume".
+        // `volume_limit_mib * 1024 * 1024` 以饱和运算处理，超大上限等价于“单个超大分卷”。
+        // `volume_limit_mib * 1024 * 1024` saturates, so an absurd limit is
+        // equivalent to "one huge volume".
         let temp = tempfile::tempdir().expect("temp dir");
         let base = temp.path().join("huge.bin");
         let payload = deterministic_bytes(64 * 1024);
@@ -3773,13 +3762,9 @@ mod tests {
         .expect("preview");
 
         assert_eq!(report.total_files, 1);
-        // 单文件归档曾硬编码为 0 / Used to be hardcoded to 0 for single-file archives.
         assert_eq!(report.uncompressed_size, payload.len() as u64);
         assert_eq!(report.entries[0].path, "blob.bin");
 
-        // 曾因错误密码仍报成功，因为 `Zst` 分支从不校验密码。
-        // Used to succeed with the wrong password because the `Zst` arm never
-        // looked at it.
         let err = list_archive_content_sync(
             DecompressRequest {
                 archive_path: path_to_string(&archive),

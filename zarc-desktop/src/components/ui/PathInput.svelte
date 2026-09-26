@@ -56,13 +56,6 @@
     >
       <Icon name={icon} size={16} />
     </span>
-    <!--
-      此处曾同时设置 `bind:value` 和 `readonly`，导致「留空自动生成」的输出路径
-      完全无法手动输入，只能靠文件对话框。现在仅在显式传入 readonly 时才只读。
-      This used to set both `bind:value` and `readonly`, so the "auto-generate
-      when empty" output path could not be typed into at all and only the file
-      dialog worked. Now it is read-only only when readonly is explicitly passed.
-    -->
     <input
       id={field?.id}
       aria-describedby={field?.description()}

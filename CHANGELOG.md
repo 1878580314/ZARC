@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.1.4 — 2026-09-27
+
+本次更新加入「关于」面板与外部链接能力，更新应用标识，并做一次轻量的体验与代码清理。
+
+### 修复与优化
+
+- 侧栏新增「关于」入口：显示当前版本，提供一键前往 GitHub 发布页检查更新、作者主页与源代码仓库链接，以及使用协议说明。
+- 新增 `open_url` 后端命令，仅允许打开 https 链接，由系统默认浏览器承载。
+- 默认压缩等级由 8 调整为 3，应用标识更新为 `com.zarc.studio`。
+- 界面标语更新为「zstd 解压缩工具」，清理注释与元数据中的过期信息。
+
+### 下载与验证
+
+- `ZARC.exe`：Windows x64 单 EXE，由 Windows 原生 MSVC/Tauri Release 工具链构建。
+- `SHA256SUMS.txt`：下载文件的 SHA-256 校验值。
+- 验证通过 Linux 46 项核心测试与前端类型/构建检查。
+
+### English
+
+Adds an About panel with version display, update check via the GitHub releases page, author/repository links, and terms of use — backed by an `open_url` command restricted to https. Default compression level is now 3; the app identifier is updated and stale metadata/comments were cleaned up. Ships a Windows x64 executable with SHA-256 checksums; verified by the 46-test Linux core suite plus frontend type-check and build.
+
 ## v0.1.3 — 2026-09-13
 
 本次更新集中修复归档完整性、取消任务、Windows 路径与 SFX 检测，并改善大文件处理和桌面交互。

@@ -1,13 +1,9 @@
 <script lang="ts" module>
   /**
    * 内联 SVG 图标集（Lucide 风格，24×24 线条）。
-   * Inline SVG icon set (Lucide style, 24×24 strokes).
-   *
-   * 整个 UI 此前用 emoji 作图标：字形随系统而异、无法着色、垂直对齐总差半像素。
-   * 换成线条路径后颜色跟随 `currentColor`，线宽统一。
-   * The whole UI previously used emoji as icons: glyphs varied with the system,
-   * couldn't be tinted, and vertical alignment was always off by half a pixel.
-   * With stroke paths, colors follow `currentColor` and stroke width is uniform.
+   * 线条路径使颜色跟随 `currentColor`，线宽统一。
+   * Inline SVG icon set (Lucide style, 24×24 strokes). Stroke paths let
+   * colors follow `currentColor` with a uniform stroke width.
    */
   export const ICONS = {
     // 导航与操作 / Navigation & actions
@@ -61,7 +57,12 @@
     app: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z|M12 2v3|M12 19v3|M22 12h-3|M5 12H2|m18.4 5.6-2.1 2.1|m7.7 7.7-2.1 2.1|m18.4 18.4-2.1-2.1|m7.7 16.3-2.1-2.1',
     image: 'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z|M9.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z|m21 15-5-5L5 21',
     video: 'M3 6h11a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z|m16 10 5-3v10l-5-3',
-    audio: 'M9 18V5l12-2v13|M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z|M18 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z'
+    audio: 'M9 18V5l12-2v13|M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z|M18 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z',
+
+    // 品牌 / Brand
+    github:
+      'M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22',
+    external: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6|M15 3h6v6|M10 14 21 3'
   } as const;
 
   export type IconName = keyof typeof ICONS;

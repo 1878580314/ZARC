@@ -251,10 +251,9 @@ fn build_sfx_executable_with_state(
 }
 
 /// 原子写入 `[host?][payload][manifest][trailer]` 容器：嵌入式 SFX 先拷宿主，
-/// sidecar 只写载荷。两种布局此前是两份几乎逐行相同的函数。
+/// sidecar 只写载荷。
 /// Atomically write a `[host?][payload][manifest][trailer]` container: embedded
-/// SFX copies the host first, sidecar writes payload only. The two layouts used
-/// to be near-identical copies of this function.
+/// SFX copies the host first, sidecar writes payload only.
 #[cfg(test)]
 fn write_sfx_container(
     target: &Path,
@@ -395,19 +394,11 @@ fn extract_embedded_archive_from_path(
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, section_reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
-    // 委托给共享的事务性路径：先暂存到临时同级路径，仅在成功后重命名落位。
-    // 旧的内联版本有两个严重缺陷：每个分支都用 `?`，解压中途失败会在到达下方清理代码之前
-    // 就返回——残缺目录树留在磁盘上；且清理一旦执行就无条件删除 `output`，导致失败解压
-    // 摧毁一个从未被写入的同名既有文件或目录。
-    //
+    // 委托给共享的事务性路径：先暂存到临时同级路径，仅在成功后重命名落位；
+    // 中途失败不会留下残缺目录树，也不会碰任何已存在的同名文件。
     // Delegated to the shared transactional path, which stages into a temp
-    // sibling and only renames into place on success.
-    //
-    // The old inline version had two serious defects. Every arm used `?`, so a
-    // mid-extraction failure returned from the function *before* reaching the
-    // cleanup below — the partial tree stayed on disk. And when cleanup did run
-    // it deleted `output` unconditionally, so a failed extraction destroyed a
-    // pre-existing file or directory of the same name that it had never written.
+    // sibling and only renames into place on success; a mid-extraction failure
+    // leaves no partial tree and never touches a pre-existing same-name file.
     let output_result = if manifest.encrypted {
         match EncryptedReader::new(progress_reader, password.as_deref().unwrap_or_default()) {
             Ok(decrypt_reader) => decompress_reader_transactionally(
@@ -929,8 +920,9 @@ mod tests {
 
         let dest_root = temp.path().join("dest");
         fs::create_dir_all(&dest_root).expect("create dest");
-        // 预先存在的同名无关文件；旧清理路径会在失败时删除它。
-        // Pre-existing unrelated file with the target name; the old failure cleanup deleted it.
+        // 预先存在的同名无关文件，失败时不得被误删。
+        // Pre-existing unrelated file with the target name; it must not be
+        // deleted on failure.
         let victim = dest_root.join("plain");
         fs::write(&victim, b"unrelated user data").expect("write victim");
 

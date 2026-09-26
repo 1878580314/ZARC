@@ -41,14 +41,7 @@
     {/each}
   </div>
 
-  <!--
-    旧实现把整份报告塞进单个 <pre> 字符串：路径无法单独复制，长哈希撑爆横向滚动条。
-    定义列表让每一项都能独立对齐和复制。
-    The old implementation packed the whole report into a single <pre> string:
-    paths could not be copied individually and long hashes blew out the
-    horizontal scrollbar. A definition list lets every item align and copy
-    on its own.
-  -->
+  <!-- 定义列表让每一项都能独立对齐和复制。 / A definition list lets every item align and copy on its own. -->
   <dl class="mt-4 flex flex-col divide-y divide-line text-xs">
     {#each fields as field (field.label)}
       <div class="flex items-start gap-3 py-2">

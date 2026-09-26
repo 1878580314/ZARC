@@ -6,6 +6,9 @@
   import { t } from '../lib/i18n/index.svelte';
   import Icon, { type IconName } from './ui/Icon.svelte';
   import Spinner from './ui/Spinner.svelte';
+  import AboutDialog from './AboutDialog.svelte';
+
+  let aboutOpen = $state(false);
 
   let navItems = $derived<
     { id: ViewId; label: string; hint: string; icon: IconName }[]
@@ -66,6 +69,15 @@
   <div class="mt-auto flex flex-col gap-1 border-t border-line pt-3">
     <button
       type="button"
+      onclick={() => (aboutOpen = true)}
+      title={t('about.title')}
+      class="flex items-center gap-2.5 rounded-control px-2.5 py-2 text-sm text-fg-soft transition-colors hover:bg-inset hover:text-fg"
+    >
+      <Icon name="info" size={17} />
+      <span class="flex-1 text-left font-medium">{t('about.open')}</span>
+    </button>
+    <button
+      type="button"
       onclick={() => theme.toggle()}
       title={t('shell.themeToggle')}
       class="flex items-center gap-2.5 rounded-control px-2.5 py-2 text-sm text-fg-soft transition-colors hover:bg-inset hover:text-fg"
@@ -76,4 +88,6 @@
       </span>
     </button>
   </div>
+
+  <AboutDialog open={aboutOpen} onClose={() => (aboutOpen = false)} />
 </aside>

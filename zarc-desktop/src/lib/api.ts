@@ -137,6 +137,7 @@ export const api = {
   previewOutput: (request: { sourcePath: string; outputPath: string | null; decompress: boolean; encrypted: boolean; outputKind?: OutputKind; splitSizeMib?: number | null }) =>
     invoke<string>('preview_output_path', { request }),
   revealOutput: (path: string) => invoke<void>('reveal_output', { path }),
+  openUrl: (url: string) => invoke<void>('open_url', { url }),
   abort: () => invoke('abort_task')
 };
 

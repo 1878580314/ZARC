@@ -48,7 +48,7 @@ export function formatCount(value: number): string {
   return value.toLocaleString(numberLocale());
 }
 
-export interface ReportField {
+interface ReportField {
   label: string;
   value: string;
   /** 长哈希/长路径需要等宽字体与换行；普通字段则不需要。 / Long hashes / long paths need a monospace font and wrapping; regular fields do not. */
@@ -201,7 +201,7 @@ export function emptyToNull(value: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-export interface PasswordStrength {
+interface PasswordStrength {
   score: 0 | 1 | 2 | 3 | 4;
   label: string;
   hint: string;

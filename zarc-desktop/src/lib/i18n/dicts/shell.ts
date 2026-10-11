@@ -2,6 +2,10 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
   zh: {
     'shell.localeToggle': '切换界面语言',
     'shell.themeToggle': '切换主题',
+    'shell.win.minimize': '最小化',
+    'shell.win.maximize': '最大化',
+    'shell.win.restore': '还原',
+    'shell.win.close': '关闭',
     'shell.theme.dark': '深色',
     'shell.theme.light': '浅色',
     'shell.mainNav': '主导航',
@@ -70,6 +74,10 @@ export const shell: { zh: Record<string, string>; en: Record<string, string> } =
   },
   en: {
     'shell.localeToggle': 'Switch interface language',
+    'shell.win.minimize': 'Minimize',
+    'shell.win.maximize': 'Maximize',
+    'shell.win.restore': 'Restore',
+    'shell.win.close': 'Close',
     'shell.themeToggle': 'Toggle theme',
     'shell.theme.dark': 'Dark',
     'shell.theme.light': 'Light',

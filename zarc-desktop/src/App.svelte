@@ -6,6 +6,7 @@
   import { initDragDrop } from './lib/dragdrop.svelte';
   import { t } from './lib/i18n/index.svelte';
   import Sidebar from './components/Sidebar.svelte';
+  import TitleBar from './components/TitleBar.svelte';
   import TopBar from './components/TopBar.svelte';
   import TaskHub from './components/TaskHub.svelte';
   import TaskStrip from './components/TaskStrip.svelte';
@@ -64,38 +65,42 @@
     style="background: var(--zarc-aurora-3)"
   ></div>
 
-  <div class="relative z-10 flex h-full">
-    {#if !isSfx}
-      <Sidebar />
-    {/if}
+  <div class="relative z-10 flex h-full flex-col">
+    <TitleBar />
 
-    <main class="flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
-      <TopBar />
-
+    <div class="flex min-h-0 flex-1">
       {#if !isSfx}
-        <div class="mx-auto w-full max-w-3xl min-[1180px]:hidden">
-          <TaskStrip />
-        </div>
+        <Sidebar />
       {/if}
 
-      <div class="mx-auto w-full max-w-3xl flex-1 pb-6">
-        {#if app.sfxError}
-          <div class="panel flex flex-col gap-4 rounded-panel p-6" role="alert">
-            <h2 class="text-lg font-bold text-danger">{t('audit.sfxError')}</h2>
-            <p class="break-words text-sm text-fg-soft" data-selectable>{app.sfxError}</p>
-            <button class="control" onclick={() => app.initSfx()}>{t('audit.retry')}</button>
-          </div>
-        {:else}
-          <div hidden={view !== 'compress'}><CompressView /></div>
-          <div hidden={view !== 'decompress'}><DecompressView /></div>
-          <div hidden={view !== 'benchmark'}><BenchmarkView /></div>
-        {/if}
-      </div>
-    </main>
+      <main class="flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4">
+        <TopBar />
 
-    {#if !isSfx}
-      <TaskHub />
-    {/if}
+        {#if !isSfx}
+          <div class="mx-auto w-full max-w-3xl min-[1180px]:hidden">
+            <TaskStrip />
+          </div>
+        {/if}
+
+        <div class="mx-auto w-full max-w-3xl flex-1 pb-6">
+          {#if app.sfxError}
+            <div class="panel flex flex-col gap-4 rounded-panel p-6" role="alert">
+              <h2 class="text-lg font-bold text-danger">{t('audit.sfxError')}</h2>
+              <p class="break-words text-sm text-fg-soft" data-selectable>{app.sfxError}</p>
+              <button class="control" onclick={() => app.initSfx()}>{t('audit.retry')}</button>
+            </div>
+          {:else}
+            <div hidden={view !== 'compress'}><CompressView /></div>
+            <div hidden={view !== 'decompress'}><DecompressView /></div>
+            <div hidden={view !== 'benchmark'}><BenchmarkView /></div>
+          {/if}
+        </div>
+      </main>
+
+      {#if !isSfx}
+        <TaskHub />
+      {/if}
+    </div>
   </div>
 
   <MasterDropZone />

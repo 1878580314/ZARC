@@ -6,14 +6,20 @@ fn tar_bytes() -> Vec<u8> {
     header.set_size(5);
     header.set_mode(0o644);
     header.set_cksum();
-    builder.append_data(&mut header, "hello.txt", &b"hello"[..]).unwrap();
+    builder
+        .append_data(&mut header, "hello.txt", &b"hello"[..])
+        .unwrap();
     builder.into_inner().unwrap()
 }
 
 #[test]
 fn default_output_strips_volume_and_case_insensitive_suffix_once() {
-    for (input, expected) in [("a.zst.001", "a"), ("FILE.ZST", "FILE"),
-        ("Tree.TAR.ZST.ENC.002", "Tree"), ("a.zst.zst", "a.zst")] {
+    for (input, expected) in [
+        ("a.zst.001", "a"),
+        ("FILE.ZST", "FILE"),
+        ("Tree.TAR.ZST.ENC.002", "Tree"),
+        ("a.zst.zst", "a.zst"),
+    ] {
         let path = Path::new(input);
         let meta = detect_archive_meta(path).unwrap();
         assert_eq!(default_decompress_name(path, meta).unwrap(), expected);
@@ -30,13 +36,21 @@ fn output_names_match_actual_format_and_selected_folder() {
         (temp.path(), "backup.zst", true, "backup.tar.zst.enc"),
         (file.as_path(), "BACKUP.TAR.ZST.ENC", false, "BACKUP.zst"),
     ] {
-        let output = resolve_compress_output(source, Some(typed), encrypted, OutputKind::Archive).unwrap();
+        let output =
+            resolve_compress_output(source, Some(typed), encrypted, OutputKind::Archive).unwrap();
         assert_eq!(output, Path::new(expected));
         assert!(detect_archive_meta(&output).is_ok());
     }
     let archive = Path::new("tree.tar.zst");
-    assert_eq!(resolve_decompress_output(archive, detect_archive_meta(archive).unwrap(),
-        Some(temp.path().to_str().unwrap())).unwrap(), temp.path().join("tree"));
+    assert_eq!(
+        resolve_decompress_output(
+            archive,
+            detect_archive_meta(archive).unwrap(),
+            Some(temp.path().to_str().unwrap())
+        )
+        .unwrap(),
+        temp.path().join("tree")
+    );
 }
 
 #[test]
@@ -45,12 +59,21 @@ fn corrupted_tail_never_commits_tar_output_or_preview() {
     let mut encoded = zstd::encode_all(&tar_bytes()[..], 1).unwrap();
     encoded.extend_from_slice(b"corrupt second frame");
     let output = temp.path().join("out");
-    assert!(decompress_reader_transactionally(&encoded[..], ArchiveKind::TarZst, &output, None).is_err());
+    assert!(
+        decompress_reader_transactionally(&encoded[..], ArchiveKind::TarZst, &output, None)
+            .is_err()
+    );
     assert!(!output.exists());
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
     let meta = detect_archive_meta(Path::new("a.tar.zst")).unwrap();
-    assert!(read_archive_listing(&encoded[..], Path::new("a.tar.zst"), meta,
-        &mut Vec::new(), &mut 0).is_err());
+    assert!(read_archive_listing(
+        &encoded[..],
+        Path::new("a.tar.zst"),
+        meta,
+        &mut Vec::new(),
+        &mut 0
+    )
+    .is_err());
 }
 
 #[test]
@@ -77,7 +100,8 @@ fn cancellation_during_tar_file_does_not_retry() {
     let calls = Arc::new(AtomicUsize::new(0));
     let reader = CancelAfterHeader {
         inner: AbortableReader::new(io::Cursor::new(tar_bytes()), Some(&state)),
-        state, calls: calls.clone(),
+        state,
+        calls: calls.clone(),
     };
     assert!(tar::Archive::new(reader).unpack(temp.path()).is_err());
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
@@ -91,7 +115,13 @@ fn source_alias_with_uncreated_parent_is_rejected() {
     fs::create_dir(&source).unwrap();
     let alias = temp.path().join("alias");
     std::os::unix::fs::symlink(&source, &alias).unwrap();
-    assert!(validate_compress_paths(&source, &alias.join("new/a.tar.zst"), OutputKind::Archive, None).is_err());
+    assert!(validate_compress_paths(
+        &source,
+        &alias.join("new/a.tar.zst"),
+        OutputKind::Archive,
+        None
+    )
+    .is_err());
 }
 
 #[cfg(unix)]
@@ -103,13 +133,26 @@ fn unreadable_subtree_aborts_directory_compression() {
     let locked = source.join("locked");
     fs::create_dir_all(&locked).unwrap();
     fs::write(locked.join("important.txt"), b"important").unwrap();
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
     // root 可越过权限；此环境无法模拟此失败。 / Root bypasses this permission fixture.
     let inaccessible = fs::read_dir(&locked).is_err();
-    let result = compress_directory(&source, &temp.path().join("out.tar.zst"), 1, false,
-        None, &ProgressReporter::new(None, "compress", 9), None, None, Some(1));
+    let hash = Arc::new(Mutex::new(blake3::Hasher::new()));
+    let sink = create_output_sink(&temp.path().join("out.tar.zst"), None, None, hash)
+        .expect("output sink");
+    let reporter = ProgressReporter::new(None, "compress", 9);
+    let job = CompressJob {
+        level: 1,
+        include_root_dir: false,
+        source_bytes: 0,
+        reporter: &reporter,
+        state: None,
+        threads: Some(1),
+    };
+    let result = compress_directory(&source, sink, &job);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-    if inaccessible { assert!(result.is_err()); }
+    if inaccessible {
+        assert!(result.is_err());
+    }
 }
 
 #[test]

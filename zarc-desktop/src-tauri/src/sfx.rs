@@ -84,61 +84,34 @@ pub(super) fn compress_sfx_archive_sync(
         ),
     );
 
-    let temp_dir = tempfile::tempdir().context("无法创建临时目录")?;
-    let temp_archive = temp_dir.path().join(default_compress_file_name(
-        &source,
-        password.is_some(),
-        OutputKind::Archive,
-    )?);
-
     let started = Instant::now();
-    let operation_result = compress_source_to(
-        source.is_dir(),
-        &source,
-        &temp_archive,
-        &request,
-        &reporter,
-        state.as_ref(),
-        None,
-    );
-
-    if let Err(err) = operation_result {
-        cleanup_sfx_output(&output);
-        reporter.fail(full_error_chain(&err));
-        log_to_file(enable_logging, &format!("生成自解压包失败: {err:#}"));
-        return Err(err);
-    }
-
-    reporter.phase("packaging");
-    let sidecar = match build_sfx_executable_with_state(&host_exe, &temp_archive, &output, &source, state.as_ref()) {
-        Ok(sidecar) => sidecar,
+    let sfx_source = SfxSource {
+        path: &source,
+        level: request.level.unwrap_or(8).clamp(1, 22),
+        include_root_dir: request.include_root_dir.unwrap_or(true),
+        password: password.as_deref(),
+        reporter: &reporter,
+        state: state.as_ref(),
+        threads: request.threads,
+        source_bytes,
+    };
+    let outcome = match build_sfx_streamed(&host_exe, &sfx_source, &output, SFX_SIDECAR_THRESHOLD) {
+        Ok(outcome) => outcome,
         Err(err) => {
             cleanup_sfx_output(&output);
             reporter.fail(full_error_chain(&err));
-            log_to_file(enable_logging, &format!("封装自解压 EXE 失败: {err:#}"));
+            log_to_file(enable_logging, &format!("生成自解压包失败: {err:#}"));
             return Err(err);
         }
     };
 
-    reporter.phase("hashing");
-    // sidecar 布局下统计/哈希载荷文件；嵌入式布局下 EXE 自身承载载荷，故统计/哈希 EXE。
-    // For the sidecar layout, size/hash the payload file; for embedded, the exe
-    // itself carries the payload so size/hash the exe.
-    let (result_path, report_sidecar) = match &sidecar {
-        Some(sc) => (sc.clone(), Some(path_to_string(sc))),
-        None => (output.clone(), None),
-    };
-    let output_bytes = fs::metadata(&result_path)
-        .with_context(|| format!("无法读取结果文件信息: {}", result_path.display()))?
-        .len();
-    let hash = Some(hash_file_sequence(&[result_path], |_| check_abort(state.as_ref()))?);
     let duration = started.elapsed().as_secs_f64();
 
     log_to_file(
         enable_logging,
         &format!(
             "生成自解压包完成. 原始大小: {}, 输出大小: {}, 耗时: {:.2}s",
-            source_bytes, output_bytes, duration
+            source_bytes, outcome.output_bytes, duration
         ),
     );
 
@@ -154,100 +127,390 @@ pub(super) fn compress_sfx_archive_sync(
         source_path: path_to_string(&source),
         output_path: path_to_string(&output),
         source_bytes,
-        output_bytes,
+        output_bytes: outcome.output_bytes,
         duration_ms: duration * 1000.0,
         throughput_mi_bs: throughput(source_bytes, duration),
-        compression_ratio: Some(ratio(output_bytes, source_bytes)),
-        blake3_hash: hash,
-        sidecar_path: report_sidecar,
+        compression_ratio: Some(ratio(outcome.output_bytes, source_bytes)),
+        blake3_hash: Some(outcome.hash),
+        sidecar_path: outcome.sidecar.map(|p| path_to_string(&p)),
     })
 }
 
-#[cfg(test)]
-fn build_sfx_executable(
-    host_exe: &Path,
-    archive_path: &Path,
-    output_exe: &Path,
-    source: &Path,
-) -> Result<Option<PathBuf>> {
-    build_sfx_executable_with_state(host_exe, archive_path, output_exe, source, None)
+/// 待压缩源及其压缩、进度、取消上下文
+/// The source being compressed plus its compression, progress and abort context.
+struct SfxSource<'a> {
+    path: &'a Path,
+    level: i32,
+    include_root_dir: bool,
+    password: Option<&'a str>,
+    reporter: &'a ProgressReporter,
+    state: Option<&'a AppState>,
+    threads: Option<u32>,
+    source_bytes: u64,
 }
 
-fn build_sfx_executable_with_state(
-    host_exe: &Path, archive_path: &Path, output_exe: &Path, source: &Path,
-    state: Option<&AppState>,
-) -> Result<Option<PathBuf>> {
-    let archive_meta = detect_archive_meta(archive_path)?;
-    let payload_length = fs::metadata(archive_path)
-        .with_context(|| format!("无法读取归档信息: {}", archive_path.display()))?
-        .len();
-    let default_extract_name = default_decompress_name(archive_path, archive_meta)?;
-    let source_name = source
-        .file_name()
-        .map(|v| v.to_string_lossy().to_string())
-        .unwrap_or_else(|| "archive".to_string());
-    let created_by_version = env!("CARGO_PKG_VERSION").to_string();
-    let parent = output_exe.parent().unwrap_or_else(|| Path::new("."));
+/// SFX 构建结果：报告所需的落盘产物信息
+/// Result of an SFX build: everything the operation report needs.
+struct SfxBuildOutcome {
+    /// sidecar 布局时为 `.payload` 文件路径；嵌入式为 None
+    /// Path of the `.payload` sidecar in sidecar layout; None when embedded.
+    sidecar: Option<PathBuf>,
+    hash: String,
+    output_bytes: u64,
+}
 
-    let use_sidecar = payload_length >= SFX_SIDECAR_THRESHOLD;
-    let payload_offset = if use_sidecar {
-        0
-    } else {
-        fs::metadata(host_exe)
-            .with_context(|| format!("无法读取宿主程序信息: {}", host_exe.display()))?
-            .len()
-    };
+/// 输出目录中的 SFX 暂存文件：所有写入经 BLAKE3 哈希与缓冲包装，成功后原子 persist。
+/// Staging file for SFX output beside the target: every byte written passes
+/// through the BLAKE3 hasher and a buffer, then the file is atomically
+/// persisted into place.
+struct SfxStaging {
+    temp: tempfile::NamedTempFile,
+    hash: Arc<Mutex<blake3::Hasher>>,
+}
+
+impl SfxStaging {
+    fn new_in(parent: &Path) -> Result<Self> {
+        Ok(Self {
+            temp: tempfile::NamedTempFile::new_in(parent)
+                .with_context(|| format!("无法在输出目录创建临时文件: {}", parent.display()))?,
+            hash: Arc::new(Mutex::new(blake3::Hasher::new())),
+        })
+    }
+
+    /// 每个写阶段取一个新缓冲写回器；落盘位置沿用文件当前偏移
+    /// Each write phase takes a fresh buffered writer; bytes land at the
+    /// file's current offset.
+    fn writer(&mut self) -> BufWriter<HashingWriter<&mut File>> {
+        BufWriter::with_capacity(
+            IO_BUFFER_SIZE,
+            HashingWriter::new(self.temp.as_file_mut(), self.hash.clone()),
+        )
+    }
+
+    /// 复制输入流进暂存并返回字节数 / Copy a reader into staging, returning bytes copied.
+    fn copy_in<R: Read>(&mut self, reader: &mut R) -> Result<u64> {
+        let mut writer = self.writer();
+        let copied = io::copy(reader, &mut writer).context("复制自解压载荷失败")?;
+        writer.flush().context("刷新自解压输出失败")?;
+        Ok(copied)
+    }
+
+    /// 把压缩载荷直写进暂存（可选加密）；zstd 流排空即返回
+    /// Stream the compressed payload (optionally encrypted) straight into
+    /// staging; returns once the zstd workers drain.
+    fn write_payload(&mut self, is_dir: bool, source: &SfxSource) -> Result<()> {
+        let job = CompressJob {
+            level: source.level,
+            include_root_dir: source.include_root_dir,
+            source_bytes: source.source_bytes,
+            reporter: source.reporter,
+            state: source.state,
+            threads: source.threads,
+        };
+        let writer = self.writer();
+        let mut writer = match source.password {
+            Some(pwd) => {
+                let enc = EncryptedWriter::new(writer, pwd)?;
+                let enc = if is_dir {
+                    compress_directory(source.path, enc, &job)?
+                } else {
+                    compress_file(source.path, enc, &job)?
+                };
+                enc.finish().context("完成加密输出失败")?
+            }
+            None => {
+                if is_dir {
+                    compress_directory(source.path, writer, &job)?
+                } else {
+                    compress_file(source.path, writer, &job)?
+                }
+            }
+        };
+        writer.flush().context("刷新自解压输出失败")
+    }
+
+    /// 追加 `[manifest][magic][manifest_offset][manifest_len]` 尾部
+    /// Append the `[manifest][magic][manifest_offset][manifest_len]` trailer.
+    fn append_manifest_and_trailer(
+        &mut self,
+        manifest_bytes: &[u8],
+        manifest_offset: u64,
+    ) -> Result<()> {
+        let mut writer = self.writer();
+        writer
+            .write_all(manifest_bytes)
+            .context("写入 SFX manifest 失败")?;
+        writer
+            .write_all(SFX_MAGIC)
+            .context("写入 SFX trailer magic 失败")?;
+        writer
+            .write_all(&manifest_offset.to_le_bytes())
+            .context("写入 SFX trailer manifest offset 失败")?;
+        writer
+            .write_all(&(manifest_bytes.len() as u64).to_le_bytes())
+            .context("写入 SFX trailer manifest length 失败")?;
+        writer.flush().context("刷新 SFX 输出失败")
+    }
+
+    fn len(&self) -> Result<u64> {
+        Ok(self.temp.as_file().metadata()?.len())
+    }
+
+    /// 截短暂存并把写指针收回 `len`；用于把“宿主+载荷”改写成“宿主+清单”
+    /// Truncate staging and rewind the write position to `len`; used to turn
+    /// a `[host][payload]` staging back into `[host][manifest]`.
+    fn truncate(&mut self, len: u64) -> Result<()> {
+        self.temp
+            .as_file()
+            .set_len(len)
+            .context("截断自解压暂存文件失败")?;
+        self.temp
+            .as_file_mut()
+            .seek(SeekFrom::Start(len))
+            .context("定位自解压暂存文件失败")?;
+        Ok(())
+    }
+
+    fn sync(&self) -> Result<()> {
+        self.temp.as_file().sync_all().context("同步自解压文件失败")
+    }
+
+    fn digest(&self) -> String {
+        hash_digest(&self.hash)
+    }
+
+    fn persist(self, target: &Path) -> Result<()> {
+        self.temp
+            .persist_noclobber(target)
+            .map_err(|err| err.error)
+            .with_context(|| format!("保存 SFX 输出失败: {}", target.display()))?;
+        Ok(())
+    }
+}
+
+fn sfx_manifest_bytes(
+    payload_offset: u64,
+    payload_length: u64,
+    encrypted: bool,
+    archive_kind: ArchiveKind,
+    name: &str,
+    payload_in_sidecar: bool,
+) -> Result<Vec<u8>> {
     let manifest = SfxManifest {
         payload_offset,
         payload_length,
-        encrypted: archive_meta.encrypted,
-        archive_kind: archive_meta.kind,
-        default_extract_name,
-        source_name,
-        created_by_version,
-        payload_in_sidecar: use_sidecar,
+        encrypted,
+        archive_kind,
+        default_extract_name: name.to_string(),
+        source_name: name.to_string(),
+        created_by_version: env!("CARGO_PKG_VERSION").to_string(),
+        payload_in_sidecar,
     };
-    let manifest_bytes = serde_json::to_vec(&manifest).context("无法序列化 SFX manifest")?;
+    serde_json::to_vec(&manifest).context("无法序列化 SFX manifest")
+}
 
-    if use_sidecar {
-        // EXE 保留清单，缺失载荷时仍能识别自解压模式。
-        // Keep a manifest in the EXE so a missing sidecar remains detectable.
-        write_sidecar_host(host_exe, output_exe, &manifest_bytes, state)?;
-        let sidecar = sidecar_path(output_exe);
-        // sidecar 内 manifest 紧随载荷，故偏移即载荷长度。
-        // Inside the sidecar the manifest follows the payload, so its offset is the payload length.
-        if let Err(err) = write_sfx_container_with_state(
-            &sidecar,
-            None,
-            archive_path,
-            payload_length,
-            &manifest_bytes,
-            payload_length,
-            parent,
-            state,
-        ) {
-            let _ = fs::remove_file(output_exe);
-            return Err(err);
-        }
-        Ok(Some(sidecar))
-    } else {
-        // 嵌入式布局：单文件 [host][payload][manifest][trailer]。
-        // Embedded layout: single file [host][payload][manifest][trailer].
-        let manifest_offset = payload_offset
-            .checked_add(payload_length)
-            .with_context(|| "SFX 文件偏移超出范围")?;
-        write_sfx_container_with_state(
-            output_exe,
-            Some(host_exe),
-            archive_path,
-            payload_length,
-            &manifest_bytes,
-            manifest_offset,
-            parent,
-            state,
-        )?;
-        Ok(None)
+/// 写 sidecar 布局的宿主 EXE：`[host][manifest][trailer]`，载荷在旁文件中。
+/// Write the sidecar-layout host exe: `[host][manifest][trailer]`; the payload
+/// lives in the sibling sidecar file.
+fn write_sfx_host_manifest(
+    host: &Path,
+    output: &Path,
+    manifest_bytes: &[u8],
+    state: Option<&AppState>,
+) -> Result<()> {
+    let mut staging = SfxStaging::new_in(output_parent(output))?;
+    {
+        let mut host_file =
+            File::open(host).with_context(|| format!("无法打开宿主程序: {}", host.display()))?;
+        let mut reader = AbortableReader::new(&mut host_file, state);
+        staging
+            .copy_in(&mut reader)
+            .with_context(|| format!("复制宿主程序失败: {}", host.display()))?;
     }
+    let host_len = staging.len()?;
+    staging.append_manifest_and_trailer(manifest_bytes, host_len)?;
+    staging.sync()?;
+    staging.persist(output)
+}
+
+/// 压缩载荷直写最终容器，不经中间归档文件。
+///
+/// 布局由载荷实际大小决定，但写盘前未知——按源大小预判：源未达阈值则按嵌入式
+/// `[host][payload]` 直写，达到阈值则按 sidecar 直写载荷。预判错误时回退为一次
+/// 载荷拷贝，与旧实现成本相同；预判正确则省掉一整趟载荷读写。
+/// Stream the compressed payload straight into the final container — no
+/// intermediate archive file.
+///
+/// The layout depends on the real payload size, unknown until compression
+/// finishes, so it is predicted from the source size: a source below the
+/// threshold streams `[host][payload]` directly, one at or above it streams
+/// the sidecar payload directly. A mispredict falls back to a single payload
+/// copy — the same cost as the previous always-copy implementation, while a
+/// correct prediction eliminates a whole payload read+write pass.
+fn build_sfx_streamed(
+    host_exe: &Path,
+    source: &SfxSource,
+    output_exe: &Path,
+    sidecar_threshold: u64,
+) -> Result<SfxBuildOutcome> {
+    let source_bytes = source.source_bytes;
+    let source_access = fs_access_path(source.path)
+        .with_context(|| format!("无法准备源路径: {}", source.path.display()))?;
+    let is_dir = fs::metadata(&source_access)
+        .with_context(|| format!("源路径不存在或无法访问: {}", source.path.display()))?
+        .is_dir();
+    let kind = if is_dir {
+        ArchiveKind::TarZst
+    } else {
+        ArchiveKind::Zst
+    };
+    let encrypted = source.password.is_some();
+    let parent = output_parent(output_exe);
+    let reporter = source.reporter;
+    let state = source.state;
+    let source_name = source
+        .path
+        .file_name()
+        .map(|v| v.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archive".to_string());
+
+    if source_bytes >= sidecar_threshold {
+        let mut staging = SfxStaging::new_in(parent)?;
+        staging.write_payload(is_dir, source)?;
+        let payload_length = staging.len()?;
+
+        if payload_length >= sidecar_threshold {
+            reporter.phase("packaging");
+            let manifest =
+                sfx_manifest_bytes(0, payload_length, encrypted, kind, &source_name, true)?;
+            staging.append_manifest_and_trailer(&manifest, payload_length)?;
+            staging.sync()?;
+            check_abort(state)?;
+            let digest = staging.digest();
+            let sidecar = sidecar_path(output_exe);
+            staging.persist(&sidecar)?;
+            write_sfx_host_manifest(host_exe, output_exe, &manifest, state)?;
+            return Ok(SfxBuildOutcome {
+                output_bytes: fs::metadata(&sidecar)
+                    .with_context(|| format!("无法读取结果文件信息: {}", sidecar.display()))?
+                    .len(),
+                sidecar: Some(sidecar),
+                hash: digest,
+            });
+        }
+
+        // 载荷意外小于阈值：并入嵌入式 EXE（一次载荷拷贝）
+        // Payload unexpectedly small: fold it into an embedded exe (one copy).
+        reporter.phase("packaging");
+        let mut exe = SfxStaging::new_in(parent)?;
+        let host_len = {
+            let mut host = File::open(host_exe)
+                .with_context(|| format!("无法打开宿主程序: {}", host_exe.display()))?;
+            exe.copy_in(&mut host)
+                .with_context(|| format!("复制宿主程序失败: {}", host_exe.display()))?;
+            exe.len()?
+        };
+        {
+            let payload_in = File::open(staging.temp.path()).context("无法回读自解压载荷")?;
+            let mut reader = AbortableReader::new(payload_in.take(payload_length), state);
+            let copied = exe.copy_in(&mut reader)?;
+            if copied != payload_length {
+                bail!("自解压载荷被截断");
+            }
+        }
+        let manifest = sfx_manifest_bytes(
+            host_len,
+            payload_length,
+            encrypted,
+            kind,
+            &source_name,
+            false,
+        )?;
+        exe.append_manifest_and_trailer(&manifest, host_len + payload_length)?;
+        exe.sync()?;
+        check_abort(state)?;
+        let digest = exe.digest();
+        exe.persist(output_exe)?;
+        return Ok(SfxBuildOutcome {
+            output_bytes: fs::metadata(output_exe)
+                .with_context(|| format!("无法读取结果文件信息: {}", output_exe.display()))?
+                .len(),
+            sidecar: None,
+            hash: digest,
+        });
+    }
+
+    let mut staging = SfxStaging::new_in(parent)?;
+    let host_len = {
+        let mut host = File::open(host_exe)
+            .with_context(|| format!("无法打开宿主程序: {}", host_exe.display()))?;
+        staging
+            .copy_in(&mut host)
+            .with_context(|| format!("复制宿主程序失败: {}", host_exe.display()))?;
+        staging.len()?
+    };
+    staging.write_payload(is_dir, source)?;
+    let payload_length = staging.len()?.saturating_sub(host_len);
+
+    if payload_length < sidecar_threshold {
+        reporter.phase("packaging");
+        let manifest = sfx_manifest_bytes(
+            host_len,
+            payload_length,
+            encrypted,
+            kind,
+            &source_name,
+            false,
+        )?;
+        staging.append_manifest_and_trailer(&manifest, host_len + payload_length)?;
+        staging.sync()?;
+        check_abort(state)?;
+        let digest = staging.digest();
+        staging.persist(output_exe)?;
+        return Ok(SfxBuildOutcome {
+            output_bytes: fs::metadata(output_exe)
+                .with_context(|| format!("无法读取结果文件信息: {}", output_exe.display()))?
+                .len(),
+            sidecar: None,
+            hash: digest,
+        });
+    }
+
+    // 载荷意外越界：拆出载荷段写入 sidecar，暂存截短为宿主+清单 EXE
+    // Payload overshot the cap: copy it out into a sidecar, then truncate the
+    // staging file back down to host + manifest.
+    reporter.phase("packaging");
+    let manifest = sfx_manifest_bytes(0, payload_length, encrypted, kind, &source_name, true)?;
+    let sidecar = sidecar_path(output_exe);
+    let mut sidecar_staging = SfxStaging::new_in(parent)?;
+    {
+        let mut payload_in = File::open(staging.temp.path()).context("无法回读自解压载荷")?;
+        payload_in
+            .seek(SeekFrom::Start(host_len))
+            .context("定位自解压载荷失败")?;
+        let mut reader = AbortableReader::new(payload_in.take(payload_length), state);
+        let copied = sidecar_staging.copy_in(&mut reader)?;
+        if copied != payload_length {
+            bail!("自解压载荷被截断");
+        }
+    }
+    sidecar_staging.append_manifest_and_trailer(&manifest, payload_length)?;
+    sidecar_staging.sync()?;
+    let digest = sidecar_staging.digest();
+    sidecar_staging.persist(&sidecar)?;
+
+    staging.truncate(host_len)?;
+    staging.append_manifest_and_trailer(&manifest, host_len)?;
+    staging.sync()?;
+    check_abort(state)?;
+    staging.persist(output_exe)?;
+    Ok(SfxBuildOutcome {
+        output_bytes: fs::metadata(&sidecar)
+            .with_context(|| format!("无法读取结果文件信息: {}", sidecar.display()))?
+            .len(),
+        sidecar: Some(sidecar),
+        hash: digest,
+    })
 }
 
 /// 原子写入 `[host?][payload][manifest][trailer]` 容器：嵌入式 SFX 先拷宿主，
@@ -264,18 +527,48 @@ fn write_sfx_container(
     manifest_offset: u64,
     parent: &Path,
 ) -> Result<()> {
-    write_sfx_container_with_state(target, host_exe, archive_path, payload_length, manifest_bytes, manifest_offset, parent, None)
+    write_sfx_container_with_state(
+        target,
+        host_exe,
+        archive_path,
+        payload_length,
+        manifest_bytes,
+        manifest_offset,
+        parent,
+        None,
+    )
 }
 
-fn write_sidecar_host(host: &Path, output: &Path, manifest: &[u8], state: Option<&AppState>) -> Result<()> {
-    write_sfx_container_with_state(output, Some(host), host, 0, manifest,
-        fs::metadata(host)?.len(), output_parent(output), state)
+#[cfg(test)]
+fn write_sidecar_host(
+    host: &Path,
+    output: &Path,
+    manifest: &[u8],
+    state: Option<&AppState>,
+) -> Result<()> {
+    write_sfx_container_with_state(
+        output,
+        Some(host),
+        host,
+        0,
+        manifest,
+        fs::metadata(host)?.len(),
+        output_parent(output),
+        state,
+    )
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn write_sfx_container_with_state(
-    target: &Path, host_exe: Option<&Path>, archive_path: &Path,
-    payload_length: u64, manifest_bytes: &[u8], manifest_offset: u64,
-    parent: &Path, state: Option<&AppState>,
+    target: &Path,
+    host_exe: Option<&Path>,
+    archive_path: &Path,
+    payload_length: u64,
+    manifest_bytes: &[u8],
+    manifest_offset: u64,
+    parent: &Path,
+    state: Option<&AppState>,
 ) -> Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("无法在输出目录创建临时文件: {}", parent.display()))?;
@@ -290,7 +583,9 @@ fn write_sfx_container_with_state(
         let file = File::open(archive_path)?;
         let mut reader = AbortableReader::new(file.take(payload_length), state);
         let copied = io::copy(&mut reader, &mut writer).context("复制自解压载荷失败")?;
-        if copied != payload_length { bail!("自解压载荷被截断"); }
+        if copied != payload_length {
+            bail!("自解压载荷被截断");
+        }
         writer
             .write_all(manifest_bytes)
             .context("写入 SFX manifest 失败")?;
@@ -391,7 +686,15 @@ fn extract_embedded_archive_from_path(
     file.seek(SeekFrom::Start(manifest.payload_offset))
         .with_context(|| "无法定位嵌入归档数据")?;
     let section_reader = file.take(manifest.payload_length);
-    let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, section_reader);
+    // 与普通解压一致：摘要随数据流同步计算，载荷即归档本体
+    // Same as the plain decompress path: the digest rides along with the
+    // data stream — the payload IS the archive body.
+    let hash = Arc::new(Mutex::new(blake3::Hasher::new()));
+    let hashing_reader = HashingReader {
+        inner: section_reader,
+        hash: hash.clone(),
+    };
+    let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, hashing_reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
     // 委托给共享的事务性路径：先暂存到临时同级路径，仅在成功后重命名落位；
@@ -426,8 +729,7 @@ fn extract_embedded_archive_from_path(
         }
     };
 
-    reporter.phase("hashing");
-    let hash = Some(hash_file_sequence(&[payload_path], |_| check_abort(state.as_ref()))?);
+    let hash = Some(hash_digest(&hash));
     let duration = started.elapsed().as_secs_f64();
     reporter.finish();
 
@@ -542,7 +844,9 @@ fn read_manifest_from_file(path: &Path, strict: bool) -> Result<Option<SfxManife
     let manifest_len: usize = manifest_length
         .try_into()
         .with_context(|| "SFX manifest 过大")?;
-    if manifest_len > 64 * 1024 { bail!("SFX manifest 超出 64 KiB 上限"); }
+    if manifest_len > 64 * 1024 {
+        bail!("SFX manifest 超出 64 KiB 上限");
+    }
     let mut manifest_bytes = vec![0_u8; manifest_len];
     file.read_exact(&mut manifest_bytes)
         .context("无法读取 SFX manifest")?;
@@ -569,72 +873,96 @@ fn archive_kind_label(kind: ArchiveKind) -> String {
 mod tests {
     use super::*;
 
-    /// 通过生产路径从小源构建 SFX。返回 EXE 路径；小载荷采用嵌入式（单文件）布局。
-    /// Build an SFX from a small source via the production path. Returns the exe
-    /// path; small payloads take the embedded (single-file) layout.
-    fn build_small_sfx(temp: &Path, source_name: &str, archive_name: &str, password: Option<&str>) -> PathBuf {
-        let source = temp.join(source_name);
-        fs::write(&source, b"hello from sfx").expect("write source");
+    /// 测试用：把源压缩为归档文件 / Test helper: compress a source into an archive file.
+    fn compress_to_archive(source: &Path, archive: &Path, password: Option<&str>) {
+        let reporter = ProgressReporter::new(None, "compress", fs::metadata(source).unwrap().len());
+        let hash = Arc::new(Mutex::new(blake3::Hasher::new()));
+        let sink = create_output_sink(archive, password, None, hash).expect("output sink");
+        let job = CompressJob {
+            level: 8,
+            include_root_dir: true,
+            source_bytes: 0,
+            reporter: &reporter,
+            state: None,
+            threads: Some(1),
+        };
+        let sink = if source.is_dir() {
+            compress_directory(source, sink, &job).expect("compress")
+        } else {
+            compress_file(source, sink, &job).expect("compress")
+        };
+        sink.finalize().expect("finalize");
+    }
 
-        let archive = temp.join(archive_name);
-        let reporter =
-            ProgressReporter::new(None, "compress", fs::metadata(&source).unwrap().len());
-        compress_file(&source, &archive, 8, password, &reporter, None, None, Some(1)).expect("compress");
-
+    /// 测试用：经生产直写路径构建 SFX；`threshold` 操控布局预判
+    /// （0 强制 sidecar，`u64::MAX` 强制嵌入式）。
+    /// Test helper: build an SFX through the production streaming path;
+    /// `threshold` steers the layout prediction (0 forces sidecar,
+    /// `u64::MAX` forces embedded).
+    fn build_sfx(
+        temp: &Path,
+        source: &Path,
+        password: Option<&str>,
+        threshold: u64,
+        output_name: &str,
+    ) -> PathBuf {
         let template = temp.join("template.exe");
-        fs::write(&template, b"MZfake-host").expect("write template");
-        let output = temp.join("plain.sfx.exe");
-        let sidecar = build_sfx_executable(&template, &archive, &output, &source).expect("build sfx");
-        assert!(sidecar.is_none(), "small payload should embed, not sidecar");
-        assert!(!sidecar_path(&output).exists(), "no sidecar for embedded layout");
+        if !template.exists() {
+            fs::write(&template, b"MZfake-host").expect("write template");
+        }
+        let output = temp.join(output_name);
+        let source_bytes = fs::metadata(source).unwrap().len();
+        let reporter = ProgressReporter::new(None, "compress", source_bytes);
+        let sfx_source = SfxSource {
+            path: source,
+            level: 8,
+            include_root_dir: true,
+            password,
+            reporter: &reporter,
+            state: None,
+            threads: Some(1),
+            source_bytes,
+        };
+        let outcome =
+            build_sfx_streamed(&template, &sfx_source, &output, threshold).expect("build sfx");
+        if threshold == 0 {
+            assert!(outcome.sidecar.is_some(), "expected forced sidecar layout");
+        }
         output
     }
 
-    /// 无论载荷多大都强制 sidecar 布局：直接调用 sidecar 构建辅助函数（绕过阈值检查）。
-    /// Force the sidecar layout regardless of payload size, by calling the
-    /// sidecar build helpers directly (bypassing the threshold check).
-    fn force_sidecar_sfx(temp: &Path, content: &[u8], password: Option<&str>) -> PathBuf {
-        let source = temp.join("src.txt");
-        fs::write(&source, content).expect("write source");
-        let archive = temp.join("src.zst");
-        let reporter =
-            ProgressReporter::new(None, "compress", fs::metadata(&source).unwrap().len());
-        compress_file(&source, &archive, 8, password, &reporter, None, None, Some(1)).expect("compress");
-
-        let template = temp.join("template.exe");
-        fs::write(&template, b"MZfake-host").expect("write template");
-        let output = temp.join("out.sfx.exe");
-
-        let archive_meta = detect_archive_meta(&archive).unwrap();
-        let payload_length = fs::metadata(&archive).unwrap().len();
-        let manifest = SfxManifest {
-            payload_offset: 0,
-            payload_length,
-            encrypted: archive_meta.encrypted,
-            archive_kind: archive_meta.kind,
-            default_extract_name: default_decompress_name(&archive, archive_meta).unwrap(),
-            source_name: "src".to_string(),
-            created_by_version: env!("CARGO_PKG_VERSION").to_string(),
-            payload_in_sidecar: true,
-        };
-        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-        let parent = output.parent().unwrap();
-        write_sidecar_host(&template, &output, &manifest_bytes, None).expect("write host marker");
-        let sidecar = sidecar_path(&output);
-        write_sfx_container(&sidecar, None, &archive, payload_length, &manifest_bytes, payload_length, parent)
-            .expect("write sidecar");
+    /// 通过生产路径从小源构建 SFX。返回 EXE 路径；小载荷采用嵌入式（单文件）布局。
+    /// Build an SFX from a small source via the production path. Returns the exe
+    /// path; small payloads take the embedded (single-file) layout.
+    fn build_small_sfx(temp: &Path, source_name: &str, password: Option<&str>) -> PathBuf {
+        let source = temp.join(source_name);
+        fs::write(&source, b"hello from sfx").expect("write source");
+        let output = build_sfx(temp, &source, password, u64::MAX, "plain.sfx.exe");
+        assert!(
+            !sidecar_path(&output).exists(),
+            "no sidecar for embedded layout"
+        );
         output
+    }
+
+    /// 无论载荷多大都强制 sidecar 布局：阈值 0 使预判与实际一致地走旁文件路径。
+    /// Force the sidecar layout regardless of payload size: a threshold of 0
+    /// sends both the prediction and the payload through the sidecar path.
+    fn force_sidecar_sfx(temp: &Path, content: &[u8], password: Option<&str>) -> PathBuf {
+        let source = temp.join("src");
+        fs::write(&source, content).expect("write source");
+        build_sfx(temp, &source, password, 0, "out.sfx.exe")
     }
 
     #[test]
     fn sfx_manifest_roundtrip_and_extracts_plain_file() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output = build_small_sfx(temp.path(), "plain.txt", "plain.zst", None);
+        let output = build_small_sfx(temp.path(), "plain.txt", None);
 
         let info = load_embedded_archive_info_from_path(&output)
             .expect("load info")
             .expect("embedded info");
-        assert_eq!(info.default_extract_name, "plain");
+        assert_eq!(info.default_extract_name, "plain.txt");
         assert!(!info.encrypted);
 
         let dest_root = temp.path().join("extract");
@@ -648,9 +976,9 @@ mod tests {
             None,
         )
         .expect("extract sfx");
-        assert!(report.output_path.ends_with("plain"));
+        assert!(report.output_path.ends_with("plain.txt"));
         assert_eq!(
-            fs::read(dest_root.join("plain")).expect("read extracted"),
+            fs::read(dest_root.join("plain.txt")).expect("read extracted"),
             b"hello from sfx"
         );
     }
@@ -661,16 +989,13 @@ mod tests {
         let source = temp.path().join("secret.txt");
         fs::write(&source, b"encrypted sfx").expect("write source");
 
-        let archive = temp.path().join("secret.zst.enc");
-        let reporter =
-            ProgressReporter::new(None, "compress", fs::metadata(&source).unwrap().len());
-        compress_file(&source, &archive, 8, Some("pw123"), &reporter, None, None, Some(1))
-            .expect("compress");
-
-        let template = temp.path().join("template.exe");
-        fs::write(&template, b"MZfake-host").expect("write template");
-        let output = temp.path().join("secret.sfx.exe");
-        build_sfx_executable(&template, &archive, &output, &source).expect("build sfx");
+        let output = build_sfx(
+            temp.path(),
+            &source,
+            Some("pw123"),
+            u64::MAX,
+            "secret.sfx.exe",
+        );
 
         let dest_root = temp.path().join("extract");
         let err = extract_embedded_archive_from_path(
@@ -693,14 +1018,16 @@ mod tests {
         // 小载荷 -> 嵌入式布局 -> manifest 位于 EXE 末尾，无 sidecar。
         // Small payload -> embedded layout -> manifest lives at exe end, no sidecar.
         let temp = tempfile::tempdir().expect("tempdir");
-        let output = build_small_sfx(temp.path(), "plain.txt", "plain.zst", None);
+        let output = build_small_sfx(temp.path(), "plain.txt", None);
         let manifest = read_embedded_manifest(&output)
             .expect("read")
             .expect("manifest present");
         assert!(!manifest.payload_in_sidecar);
         // payload_offset 即宿主 EXE 的大小；载荷紧随其后位于 EXE 内部。
         // payload_offset is the host exe size; payload follows it inside the exe.
-        let host_len = fs::metadata(temp.path().join("template.exe")).unwrap().len();
+        let host_len = fs::metadata(temp.path().join("template.exe"))
+            .unwrap()
+            .len();
         assert_eq!(manifest.payload_offset, host_len);
     }
 
@@ -727,7 +1054,10 @@ mod tests {
             None,
         )
         .expect("sidecar extract");
-        assert_eq!(fs::read(dest.join("src")).expect("read"), b"sidecar payload data");
+        assert_eq!(
+            fs::read(dest.join("src")).expect("read"),
+            b"sidecar payload data"
+        );
     }
 
     #[test]
@@ -769,8 +1099,13 @@ mod tests {
         let output = force_sidecar_sfx(temp.path(), b"sidecar payload data", None);
         // 删除侧车后 SFX 不再可读 / Removing the sidecar makes the SFX unreadable.
         fs::remove_file(sidecar_path(&output)).expect("remove sidecar");
-        let info = load_embedded_archive_info_from_path(&output).unwrap().unwrap();
-        assert!(!info.payload_ready, "host marker must survive loss of sidecar");
+        let info = load_embedded_archive_info_from_path(&output)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !info.payload_ready,
+            "host marker must survive loss of sidecar"
+        );
 
         let dest = temp.path().join("out");
         let err = extract_embedded_archive_from_path(
@@ -797,8 +1132,7 @@ mod tests {
         // 成对重命名两个文件 / Rename both files as a pair.
         let new_exe = temp.path().join("renamed.exe");
         fs::rename(&output, &new_exe).expect("rename exe");
-        fs::rename(sidecar_path(&output), sidecar_path(&new_exe))
-            .expect("rename sidecar");
+        fs::rename(sidecar_path(&output), sidecar_path(&new_exe)).expect("rename sidecar");
 
         let dest = temp.path().join("out");
         extract_embedded_archive_from_path(
@@ -823,7 +1157,10 @@ mod tests {
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.extend_from_slice(&65537u64.to_le_bytes());
         fs::write(&path, bytes).unwrap();
-        assert!(read_manifest_from_file(&path, true).unwrap_err().to_string().contains("64 KiB"));
+        assert!(read_manifest_from_file(&path, true)
+            .unwrap_err()
+            .to_string()
+            .contains("64 KiB"));
     }
 
     #[test]
@@ -856,10 +1193,7 @@ mod tests {
         fs::write(&source, b"contained").expect("write source");
 
         let archive = temp.path().join("payload.zst");
-        let reporter =
-            ProgressReporter::new(None, "compress", fs::metadata(&source).unwrap().len());
-        compress_file(&source, &archive, 8, None, &reporter, None, None, Some(1))
-            .expect("compress");
+        compress_to_archive(&source, &archive, None);
 
         // 手工构建 manifest 指向用户目录之外的 SFX。
         // Build an SFX whose manifest targets outside the selected directory.
@@ -916,7 +1250,7 @@ mod tests {
     #[test]
     fn failed_sfx_extraction_preserves_existing_output() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output = build_small_sfx(temp.path(), "plain.txt", "plain.zst", Some("pw123"));
+        let output = build_small_sfx(temp.path(), "plain.txt", Some("pw123"));
 
         let dest_root = temp.path().join("dest");
         fs::create_dir_all(&dest_root).expect("create dest");
@@ -958,29 +1292,42 @@ mod tests {
         }
 
         let archive = temp.path().join("tree.tar.zst");
-        let reporter = ProgressReporter::new(None, "compress", 0);
-        compress_directory(
-            &source,
-            &archive,
-            3,
-            true,
-            None,
-            &reporter,
-            None,
-            None,
-            Some(1),
-        )
-        .expect("compress dir");
+        compress_to_archive(&source, &archive, None);
 
         // 截断负载，使 tar 解压中途失败 / Truncate the payload so tar extraction fails midway.
         let raw = fs::read(&archive).expect("read archive");
         let truncated = temp.path().join("tree.trunc.tar.zst");
         fs::write(&truncated, &raw[..raw.len() / 2]).expect("write truncated");
 
+        // 手工封装嵌入式容器：[host][truncated payload][manifest][trailer]
+        // Hand-pack the embedded container: [host][truncated payload][manifest][trailer].
         let template = temp.path().join("template.exe");
         fs::write(&template, b"MZfake-host").expect("write template");
         let output = temp.path().join("tree.sfx.exe");
-        build_sfx_executable(&template, &truncated, &output, &source).expect("build sfx");
+        let host_len = fs::metadata(&template).unwrap().len();
+        let payload_length = fs::metadata(&truncated).unwrap().len();
+        let manifest = SfxManifest {
+            payload_offset: host_len,
+            payload_length,
+            encrypted: false,
+            archive_kind: ArchiveKind::TarZst,
+            default_extract_name: "tree".to_string(),
+            source_name: "tree".to_string(),
+            created_by_version: env!("CARGO_PKG_VERSION").to_string(),
+            payload_in_sidecar: false,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let parent = output.parent().unwrap();
+        write_sfx_container(
+            &output,
+            Some(&template),
+            &truncated,
+            payload_length,
+            &manifest_bytes,
+            host_len + payload_length,
+            parent,
+        )
+        .expect("write container");
 
         let dest_root = temp.path().join("dest");
         extract_embedded_archive_from_path(

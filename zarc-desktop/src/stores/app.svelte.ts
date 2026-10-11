@@ -3,9 +3,9 @@ import { api } from '../lib/api';
 import type { PathKind } from '../lib/format';
 import { t } from '../lib/i18n/index.svelte';
 
-export type StatusLevel = 'idle' | 'busy' | 'success' | 'error';
+type StatusLevel = 'idle' | 'busy' | 'success' | 'error';
 
-export interface AppStatus {
+interface AppStatus {
   message: string;
   level: StatusLevel;
 }

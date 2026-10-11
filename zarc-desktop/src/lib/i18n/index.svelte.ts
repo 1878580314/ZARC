@@ -27,7 +27,7 @@ export function numberLocale(): string {
   return i18n.locale === 'zh' ? 'zh-CN' : 'en-US';
 }
 
-export function setLocale(locale: Locale): void {
+function setLocale(locale: Locale): void {
   i18n.locale = locale;
   try {
     localStorage.setItem(STORAGE_KEY, locale);

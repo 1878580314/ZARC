@@ -83,7 +83,7 @@
       ? t('compress.levelHint.low')
       : level <= 12
         ? t('compress.levelHint.mid')
-        : level <= 19
+        : level <= 21
           ? t('compress.levelHint.high')
           : t('compress.levelHint.extreme')
   );

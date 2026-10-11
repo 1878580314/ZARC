@@ -1,6 +1,6 @@
 [package]
 name = "zarc-desktop"
-version = "0.1.4"
+version = "1.0.0"
 description = "High-performance zstd desktop utility"
 license = "MIT"
 edition = "2021"

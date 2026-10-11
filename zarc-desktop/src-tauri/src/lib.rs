@@ -1,9 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -185,45 +186,99 @@ enum OutputKind {
 
 struct MultiVolumeWriter {
     base_path: PathBuf,
-    current_file: Option<BufWriter<File>>,
+    current_file: Option<BufWriter<HashingWriter<File>>>,
+    /// 跨分卷共享的摘要：按写入顺序覆盖每一卷，等价于按序重读整个分卷链
+    /// Hasher shared across volumes: covers each volume in write order,
+    /// equivalent to re-reading the whole chain sequentially.
+    hash: Arc<Mutex<blake3::Hasher>>,
     current_index: usize,
     bytes_written_in_volume: u64,
     volume_limit: u64,
+    /// 已关闭分卷的后台落盘任务 / Background fsync tasks for closed volumes.
+    pending_syncs: VecDeque<JoinHandle<io::Result<()>>>,
 }
 
+/// 同时处于后台落盘中的分卷上限；磁盘拥塞时阻止同步线程无限堆积
+/// Cap on volumes syncing in the background, so a congested disk cannot
+/// pile up an unbounded number of fsync threads.
+const MAX_PENDING_VOLUME_SYNCS: usize = 4;
+
 impl MultiVolumeWriter {
-    fn new(base_path: PathBuf, volume_limit_mib: u64) -> Self {
+    fn new(base_path: PathBuf, volume_limit_mib: u64, hash: Arc<Mutex<blake3::Hasher>>) -> Self {
         Self {
             base_path,
             current_file: None,
+            hash,
             current_index: 1,
             bytes_written_in_volume: 0,
             // saturating_mul：非法的 MiB 值必须退化为“单个超大分卷”，绝不能回绕成碎化归档的小上限
             // `saturating_mul`: a nonsense MiB value degrades to "one huge volume", never
             // wraps into a tiny limit that would shred the archive into millions of files.
             volume_limit: volume_limit_mib.saturating_mul(1024 * 1024),
+            pending_syncs: VecDeque::new(),
         }
     }
 
-    fn ensure_file(&mut self) -> io::Result<&mut BufWriter<File>> {
+    fn ensure_file(&mut self) -> io::Result<&mut BufWriter<HashingWriter<File>>> {
         if self.current_file.is_none() {
             let path = multi_volume_path(&self.base_path, self.current_index)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             let file = File::create(path)?;
-            self.current_file = Some(BufWriter::with_capacity(IO_BUFFER_SIZE, file));
+            self.current_file = Some(BufWriter::with_capacity(
+                IO_BUFFER_SIZE,
+                HashingWriter::new(file, self.hash.clone()),
+            ));
         }
         Ok(self.current_file.as_mut().unwrap())
     }
 
-    /// 落盘关闭当前分卷并推进到下一卷 / Close the current volume durably and move to the next index.
+    /// 落盘关闭当前分卷并推进到下一卷；fsync 转交后台线程，写下一卷与上一卷落盘并行
+    /// Close the current volume and move to the next index; the fsync runs on a
+    /// background thread so writing the next volume overlaps the disk flush.
     fn rotate_volume(&mut self) -> io::Result<()> {
         if let Some(mut f) = self.current_file.take() {
             f.flush()?;
-            f.get_ref().sync_all()?;
+            let file = f.into_inner().map_err(|e| e.into_error())?;
+            self.limit_pending_syncs()?;
+            self.pending_syncs
+                .push_back(std::thread::spawn(move || file.sync_all()));
         }
         self.current_index += 1;
         self.bytes_written_in_volume = 0;
         Ok(())
+    }
+
+    /// 等待最旧的落盘任务直到低于并发上限；后台失败必须在产出下一卷前浮现
+    /// Wait on the oldest sync task once the cap is reached; a background
+    /// failure must surface before more volumes are produced.
+    fn limit_pending_syncs(&mut self) -> io::Result<()> {
+        while self.pending_syncs.len() >= MAX_PENDING_VOLUME_SYNCS {
+            let oldest = self.pending_syncs.pop_front().expect("queue non-empty");
+            oldest
+                .join()
+                .map_err(|_| io::Error::other("分卷落盘线程异常"))??;
+        }
+        Ok(())
+    }
+
+    /// 回收全部后台落盘任务；返回首个失败但不跳过剩余 join，避免泄漏线程
+    /// Drain every background sync; report the first failure but keep joining
+    /// the rest so threads are never leaked.
+    fn drain_pending_syncs(&mut self) -> io::Result<()> {
+        let mut first_err = None;
+        while let Some(worker) = self.pending_syncs.pop_front() {
+            match worker.join() {
+                Err(_) if first_err.is_none() => {
+                    first_err = Some(io::Error::other("分卷落盘线程异常"));
+                }
+                Ok(Err(err)) if first_err.is_none() => first_err = Some(err),
+                _ => {}
+            }
+        }
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     fn sync_all(&mut self) -> io::Result<()> {
@@ -231,7 +286,18 @@ impl MultiVolumeWriter {
             f.flush()?;
             f.get_ref().sync_all()?;
         }
-        Ok(())
+        self.drain_pending_syncs()
+    }
+}
+
+impl Drop for MultiVolumeWriter {
+    fn drop(&mut self) {
+        // 错误路径上后台任务可能仍在落盘；detach 会延长文件句柄占用，join 掉再退出
+        // On error paths background syncs may still be running; detach would
+        // keep file handles alive past cleanup, so join them on the way out.
+        while let Some(worker) = self.pending_syncs.pop_front() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -347,20 +413,32 @@ struct EmbeddedArchiveInfo {
     payload_ready: bool,
 }
 
+/// 在阻塞线程池上跑长任务：重置取消标志、注入共享 AppState、统一错误映射。
+/// Run a long task on the blocking pool: reset the abort flag, inject the
+/// shared AppState, and map errors uniformly.
+async fn run_task<F, T>(state: &State<'_, AppState>, task: F) -> std::result::Result<T, String>
+where
+    F: FnOnce(Option<AppState>) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    state.reset_abort();
+    let state_inner = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || task(Some(state_inner)))
+        .await
+        .map_err(|err| format!("任务线程异常: {err}"))?
+        .map_err(|err| full_error_chain(&err))
+}
+
 #[tauri::command]
 async fn list_archive_content(
     app: AppHandle,
     state: State<'_, AppState>,
     request: DecompressRequest,
 ) -> std::result::Result<ArchiveContentReport, String> {
-    state.reset_abort();
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        list_archive_content_sync(request, Some(app), Some(state_inner))
+    run_task(&state, move |s| {
+        list_archive_content_sync(request, Some(app), s)
     })
     .await
-    .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| full_error_chain(&err))
 }
 
 fn list_archive_content_sync(
@@ -412,7 +490,10 @@ fn list_archive_content_inner(
         )
     };
     let hash = Arc::new(Mutex::new(blake3::Hasher::new()));
-    let reader = HashingReader { inner: reader, hash: hash.clone() };
+    let reader = HashingReader {
+        inner: reader,
+        hash: hash.clone(),
+    };
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
     let abortable = AbortableReader::new(progress_reader, state.as_ref());
@@ -455,7 +536,11 @@ fn read_archive_listing<R: Read>(
                     bail!("归档超过 100000 条预览上限，请直接解压");
                 }
                 entries.push(ArchiveEntry {
-                    path: entry.path().context("归档条目路径无效")?.to_string_lossy().to_string(),
+                    path: entry
+                        .path()
+                        .context("归档条目路径无效")?
+                        .to_string_lossy()
+                        .to_string(),
                     size,
                     is_dir,
                 });
@@ -671,7 +756,12 @@ impl ProgressReporter {
 
         let payload = ProgressPayload {
             operation: self.operation.to_string(),
-            phase: self.state.phase.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            phase: self
+                .state
+                .phase
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             processed_bytes: processed,
             total_bytes: self.total,
             percent: percent.clamp(0.0, if done { 100.0 } else { 99.9 }),
@@ -700,17 +790,63 @@ struct HashingReader<R> {
 impl<R: Read> Read for HashingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
-        self.hash.lock().unwrap_or_else(|e| e.into_inner()).update(&buf[..n]);
+        self.hash
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .update(&buf[..n]);
         Ok(n)
     }
 }
 
+/// [`HashingReader`] 的写入端镜像：把每个落盘字节喂进共享 hasher，
+/// 归档写完即完成摘要，省去末尾整趟回读。
+/// Write-side mirror of [`HashingReader`]: feeds every byte bound for the
+/// file into the shared hasher, so the digest is complete the moment the
+/// last flush lands — no end-of-run re-read pass.
+struct HashingWriter<W> {
+    inner: W,
+    hash: Arc<Mutex<blake3::Hasher>>,
+}
+
+impl<W> HashingWriter<W> {
+    fn new(inner: W, hash: Arc<Mutex<blake3::Hasher>>) -> Self {
+        Self { inner, hash }
+    }
+}
+
+impl HashingWriter<File> {
+    fn sync_all(&self) -> io::Result<()> {
+        self.inner.sync_all()
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hash
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 fn hash_digest(hash: &Mutex<blake3::Hasher>) -> String {
-    hash.lock().unwrap_or_else(|e| e.into_inner()).finalize().to_hex().to_string()
+    hash.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .finalize()
+        .to_hex()
+        .to_string()
 }
 
 fn check_abort(state: Option<&AppState>) -> Result<()> {
-    if state.is_some_and(AppState::is_aborted) { bail!("用户已终止任务"); }
+    if state.is_some_and(AppState::is_aborted) {
+        bail!("用户已终止任务");
+    }
     Ok(())
 }
 
@@ -720,7 +856,9 @@ fn count_source_bytes_cancellable(path: &Path, state: Option<&AppState>) -> Resu
     for entry in WalkDir::new(root) {
         check_abort(state)?;
         let entry = entry.context("遍历待压缩目录失败，归档已中止")?;
-        if entry.file_type().is_file() { total = total.saturating_add(entry.metadata()?.len()); }
+        if entry.file_type().is_file() {
+            total = total.saturating_add(entry.metadata()?.len());
+        }
     }
     Ok(total)
 }
@@ -769,8 +907,8 @@ impl<W: Write> Write for CountingWriter<W> {
 }
 
 enum OutputSink {
-    Plain(BufWriter<File>),
-    Encrypted(EncryptedWriter<BufWriter<File>>),
+    Plain(BufWriter<HashingWriter<File>>),
+    Encrypted(EncryptedWriter<BufWriter<HashingWriter<File>>>),
     MultiVolume(MultiVolumeWriter),
     MultiVolumeEncrypted(EncryptedWriter<MultiVolumeWriter>),
 }
@@ -1101,14 +1239,10 @@ async fn compress_archive(
     state: State<'_, AppState>,
     request: CompressRequest,
 ) -> std::result::Result<OperationReport, String> {
-    state.reset_abort();
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        compress_archive_sync(request, Some(app), Some(state_inner))
+    run_task(&state, move |s| {
+        compress_archive_sync(request, Some(app), s)
     })
     .await
-    .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| full_error_chain(&err))
 }
 
 #[tauri::command]
@@ -1117,14 +1251,10 @@ async fn decompress_archive(
     state: State<'_, AppState>,
     request: DecompressRequest,
 ) -> std::result::Result<OperationReport, String> {
-    state.reset_abort();
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        decompress_archive_sync(request, Some(app), Some(state_inner))
+    run_task(&state, move |s| {
+        decompress_archive_sync(request, Some(app), s)
     })
     .await
-    .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| full_error_chain(&err))
 }
 
 #[tauri::command]
@@ -1142,9 +1272,15 @@ fn measure_directory(root: &Path, generation: u64) -> (u64, u64, bool) {
     let started = Instant::now();
     let walk_root = fs_access_path(root).unwrap_or_else(|_| root.to_path_buf());
     let mut incomplete = false;
-    for (visited, entry) in WalkDir::new(&walk_root).follow_links(false).into_iter().enumerate() {
-        if visited as u64 >= PATH_INSPECT_ENTRY_CAP || started.elapsed() > Duration::from_secs(2)
-            || INSPECTION_GENERATION.load(AtomicOrdering::Relaxed) != generation {
+    for (visited, entry) in WalkDir::new(&walk_root)
+        .follow_links(false)
+        .into_iter()
+        .enumerate()
+    {
+        if visited as u64 >= PATH_INSPECT_ENTRY_CAP
+            || started.elapsed() > Duration::from_secs(2)
+            || INSPECTION_GENERATION.load(AtomicOrdering::Relaxed) != generation
+        {
             return (bytes, files, true);
         }
         match entry {
@@ -1154,9 +1290,9 @@ fn measure_directory(root: &Path, generation: u64) -> (u64, u64, bool) {
                     Ok(m) => bytes = bytes.saturating_add(m.len()),
                     Err(_) => incomplete = true,
                 }
-            },
+            }
             Err(_) => incomplete = true,
-            _ => {},
+            _ => {}
         }
     }
     (bytes, files, incomplete)
@@ -1169,10 +1305,16 @@ fn measure_directory(root: &Path, generation: u64) -> (u64, u64, bool) {
 /// Name heuristics are unreliable (`release.v2/` is a directory, `Makefile` a
 /// file); only a `stat` can answer this.
 #[tauri::command]
-async fn inspect_path(path: String, measure: Option<bool>) -> std::result::Result<PathInfo, String> {
+async fn inspect_path(
+    path: String,
+    measure: Option<bool>,
+) -> std::result::Result<PathInfo, String> {
     let measure = measure.unwrap_or(true);
-    let generation = if measure { INSPECTION_GENERATION.fetch_add(1, AtomicOrdering::Relaxed) + 1 }
-        else { INSPECTION_GENERATION.load(AtomicOrdering::Relaxed) };
+    let generation = if measure {
+        INSPECTION_GENERATION.fetch_add(1, AtomicOrdering::Relaxed) + 1
+    } else {
+        INSPECTION_GENERATION.load(AtomicOrdering::Relaxed)
+    };
     tauri::async_runtime::spawn_blocking(move || {
         let target = PathBuf::from(&path);
         let Ok(access_target) = fs_access_path(&target) else {
@@ -1197,9 +1339,19 @@ async fn inspect_path(path: String, measure: Option<bool>) -> std::result::Resul
         };
 
         if metadata.is_dir() {
-            let (size_bytes, file_count, truncated) = if measure { measure_directory(&target, generation) }
-                else { (0, 0, true) };
-            PathInfo { path, exists: true, is_dir: true, size_bytes, file_count, truncated }
+            let (size_bytes, file_count, truncated) = if measure {
+                measure_directory(&target, generation)
+            } else {
+                (0, 0, true)
+            };
+            PathInfo {
+                path,
+                exists: true,
+                is_dir: true,
+                size_bytes,
+                file_count,
+                truncated,
+            }
         } else {
             PathInfo {
                 path,
@@ -1221,14 +1373,10 @@ async fn extract_embedded_archive(
     state: State<'_, AppState>,
     request: EmbeddedDecompressRequest,
 ) -> std::result::Result<OperationReport, String> {
-    state.reset_abort();
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        sfx::extract_embedded_archive_from_current_exe(request, Some(app), Some(state_inner))
+    run_task(&state, move |s| {
+        sfx::extract_embedded_archive_from_current_exe(request, Some(app), s)
     })
     .await
-    .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| full_error_chain(&err))
 }
 
 #[tauri::command]
@@ -1236,14 +1384,7 @@ async fn benchmark_compression(
     state: State<'_, AppState>,
     request: BenchmarkRequest,
 ) -> std::result::Result<BenchmarkReport, String> {
-    state.reset_abort();
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        benchmark_compression_sync(request, Some(state_inner))
-    })
-    .await
-    .map_err(|err| format!("任务线程异常: {err}"))?
-    .map_err(|err| full_error_chain(&err))
+    run_task(&state, move |s| benchmark_compression_sync(request, s)).await
 }
 
 #[tauri::command]
@@ -1270,14 +1411,21 @@ async fn preview_output_path(request: OutputPreviewRequest) -> std::result::Resu
             let meta = detect_archive_meta(&source)?;
             resolve_decompress_output(&source, meta, request.output_path.as_deref())?
         } else {
-            resolve_compress_output(&source, request.output_path.as_deref(), request.encrypted,
-                request.output_kind.unwrap_or(OutputKind::Archive))?
+            resolve_compress_output(
+                &source,
+                request.output_path.as_deref(),
+                request.encrypted,
+                request.output_kind.unwrap_or(OutputKind::Archive),
+            )?
         };
         if !request.decompress && split_enabled(request.split_size_mib) {
             output = multi_volume_path(&output, 1)?;
         }
         Ok(path_to_string(&resolve_future_path(&output)?))
-    }).await.map_err(|e| e.to_string())?.map_err(|e| full_error_chain(&e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| full_error_chain(&e))
 }
 
 #[tauri::command]
@@ -1288,16 +1436,29 @@ async fn reveal_output(path: String) -> std::result::Result<(), String> {
         {
             // Explorer 的 /select 参数不支持 verbatim 前缀。 / Explorer expects a display path.
             let raw = path.to_string_lossy();
-            let display = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") }
-                else { raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string() };
-            std::process::Command::new("explorer.exe").arg(format!("/select,{display}")).spawn()?;
+            let display = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{unc}")
+            } else {
+                raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string()
+            };
+            std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{display}"))
+                .spawn()?;
         }
         #[cfg(target_os = "macos")]
-        std::process::Command::new("open").arg("-R").arg(&path).spawn()?;
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()?;
         #[cfg(all(unix, not(target_os = "macos")))]
-        std::process::Command::new("xdg-open").arg(output_parent(&path)).spawn()?;
+        std::process::Command::new("xdg-open")
+            .arg(output_parent(&path))
+            .spawn()?;
         Ok(())
-    }).await.map_err(|e| e.to_string())?.map_err(|e| full_error_chain(&e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| full_error_chain(&e))
 }
 
 /// 用系统默认浏览器打开外部 https 链接（关于页的检查更新与 GitHub 链接）。
@@ -1314,13 +1475,18 @@ async fn open_url(url: String) -> std::result::Result<(), String> {
             bail!("仅允许打开 https 链接");
         }
         #[cfg(windows)]
-        std::process::Command::new("explorer.exe").arg(url).spawn()?;
+        std::process::Command::new("explorer.exe")
+            .arg(url)
+            .spawn()?;
         #[cfg(target_os = "macos")]
         std::process::Command::new("open").arg(url).spawn()?;
         #[cfg(all(unix, not(target_os = "macos")))]
         std::process::Command::new("xdg-open").arg(url).spawn()?;
         Ok(())
-    }).await.map_err(|e| e.to_string())?.map_err(|e| full_error_chain(&e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| full_error_chain(&e))
 }
 
 /// 日志落盘句柄，每进程至多打开一次；exe 目录不可写时回退到临时目录。
@@ -1368,13 +1534,16 @@ fn compress_archive_sync(
     state: Option<AppState>,
 ) -> Result<OperationReport> {
     let source = PathBuf::from(request.source_path.trim());
-    let source_access = fs_access_path(&source)
-        .with_context(|| format!("无法准备源路径: {}", source.display()))?;
+    let source_access =
+        fs_access_path(&source).with_context(|| format!("无法准备源路径: {}", source.display()))?;
     let source_metadata = fs::metadata(&source_access)
         .with_context(|| format!("源路径不存在或无法访问: {}", source.display()))?;
 
     let output_kind = request.output_kind.unwrap_or(OutputKind::Archive);
-    let encrypted = request.password.as_ref().is_some_and(|p| !p.trim().is_empty());
+    let encrypted = request
+        .password
+        .as_ref()
+        .is_some_and(|p| !p.trim().is_empty());
     let split_size_mib = request.split_size_mib;
     let enable_logging = request.enable_logging.unwrap_or(false);
     let delete_source_after = request.delete_source_after.unwrap_or(false);
@@ -1383,7 +1552,9 @@ fn compress_archive_sync(
     let source_bytes = count_source_bytes_cancellable(&source, state.as_ref())?;
     if let Some(raw) = request.output_path.as_deref() {
         let raw = Path::new(raw.trim());
-        if !raw.is_dir() { ensure_output_available(raw, output_kind, split_size_mib)?; }
+        if !raw.is_dir() {
+            ensure_output_available(raw, output_kind, split_size_mib)?;
+        }
     }
     let output = resolve_compress_output(
         &source,
@@ -1428,25 +1599,32 @@ fn compress_archive_sync(
     }
 
     let started = Instant::now();
-    let operation_result = compress_source_to(
+    let job = CompressJob {
+        level: request.level.unwrap_or(8).clamp(1, 22),
+        include_root_dir: request.include_root_dir.unwrap_or(true),
+        source_bytes,
+        reporter: &reporter,
+        state: state.as_ref(),
+        threads: request.threads,
+    };
+    let digest = match compress_source_to(
         source_metadata.is_dir(),
         &source,
         &output,
         &request,
-        &reporter,
-        state.as_ref(),
         split_size_mib,
-    );
+        &job,
+    ) {
+        Ok(digest) => digest,
+        Err(err) => {
+            cleanup_compress_output(&output, split_size_mib);
+            reporter.fail(err.to_string());
+            log_to_file(enable_logging, &format!("压缩失败: {}", err));
+            return Err(err);
+        }
+    };
 
-    if let Err(err) = operation_result {
-        cleanup_compress_output(&output, split_size_mib);
-        reporter.fail(err.to_string());
-        log_to_file(enable_logging, &format!("压缩失败: {}", err));
-        return Err(err);
-    }
-
-    reporter.phase("hashing");
-    let (reported_output, output_bytes, hash) = compress_output_report(&output, split_size_mib, state.as_ref())?;
+    let (reported_output, output_bytes) = compress_output_report(&output, split_size_mib)?;
     let duration = started.elapsed().as_secs_f64();
 
     log_to_file(
@@ -1474,7 +1652,7 @@ fn compress_archive_sync(
         duration_ms: duration * 1000.0,
         throughput_mi_bs: throughput(source_bytes, duration),
         compression_ratio: Some(ratio(output_bytes, source_bytes)),
-        blake3_hash: hash,
+        blake3_hash: Some(digest),
         sidecar_path: None,
     })
 }
@@ -1519,7 +1697,10 @@ fn decompress_archive_sync(
     };
 
     let hash = Arc::new(Mutex::new(blake3::Hasher::new()));
-    let reader = HashingReader { inner: reader, hash: hash.clone() };
+    let reader = HashingReader {
+        inner: reader,
+        hash: hash.clone(),
+    };
     let buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
     let progress_reader = ProgressReader::new(buf_reader, reporter.clone());
 
@@ -1695,10 +1876,11 @@ fn create_output_sink(
     path: &Path,
     password: Option<&str>,
     split_size_mib: Option<u64>,
+    hash: Arc<Mutex<blake3::Hasher>>,
 ) -> Result<OutputSink> {
     match (password, split_size_mib) {
         (Some(pwd), Some(size)) if size > 0 => {
-            let writer = MultiVolumeWriter::new(path.to_path_buf(), size);
+            let writer = MultiVolumeWriter::new(path.to_path_buf(), size, hash);
             Ok(OutputSink::MultiVolumeEncrypted(EncryptedWriter::new(
                 writer, pwd,
             )?))
@@ -1706,17 +1888,18 @@ fn create_output_sink(
         (None, Some(size)) if size > 0 => Ok(OutputSink::MultiVolume(MultiVolumeWriter::new(
             path.to_path_buf(),
             size,
+            hash,
         ))),
         (Some(pwd), _) => {
             let file = File::create(path)
                 .with_context(|| format!("无法创建输出文件: {}", path.display()))?;
-            let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
+            let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, HashingWriter::new(file, hash));
             Ok(OutputSink::Encrypted(EncryptedWriter::new(writer, pwd)?))
         }
         (None, _) => {
             let file = File::create(path)
                 .with_context(|| format!("无法创建输出文件: {}", path.display()))?;
-            let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
+            let writer = BufWriter::with_capacity(IO_BUFFER_SIZE, HashingWriter::new(file, hash));
             Ok(OutputSink::Plain(writer))
         }
     }
@@ -1790,7 +1973,10 @@ fn split_enabled(split_size_mib: Option<u64>) -> bool {
 /// from it is what makes "选择任意分卷" work instead of erroring out.
 fn volume_base_path(volume_path: &Path) -> PathBuf {
     let mut base = volume_path.to_path_buf();
-    let Some(name) = volume_path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+    let Some(name) = volume_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+    else {
         return base;
     };
     if let Some((stem, suffix)) = name.rsplit_once('.') {
@@ -1896,20 +2082,12 @@ fn cleanup_compress_output(base_path: &Path, split_size_mib: Option<u64>) {
     }
 }
 
-fn compress_output_report(
-    base_path: &Path,
-    split_size_mib: Option<u64>,
-    state: Option<&AppState>,
-) -> Result<(PathBuf, u64, Option<String>)> {
+fn compress_output_report(base_path: &Path, split_size_mib: Option<u64>) -> Result<(PathBuf, u64)> {
     if !split_enabled(split_size_mib) {
         let output_bytes = fs::metadata(base_path)
             .with_context(|| format!("无法读取结果文件信息: {}", base_path.display()))?
             .len();
-        return Ok((
-            base_path.to_path_buf(),
-            output_bytes,
-            Some(hash_file_sequence(&[base_path.to_path_buf()], |_| check_abort(state))?),
-        ));
+        return Ok((base_path.to_path_buf(), output_bytes));
     }
 
     let volumes = existing_volume_paths(base_path)?;
@@ -1920,29 +2098,26 @@ fn compress_output_report(
         );
     }
 
-    let mut output_bytes = 0_u64;
-    for volume in &volumes {
-        output_bytes = output_bytes.saturating_add(
-            fs::metadata(volume)
-                .with_context(|| format!("无法读取分卷文件信息: {}", volume.display()))?
-                .len(),
-        );
-    }
+    let output_bytes = paths_total_bytes(&volumes)?;
 
-    let hash = hash_file_sequence(&volumes, |_| check_abort(state))?;
-    Ok((volumes[0].clone(), output_bytes, Some(hash)))
+    Ok((volumes[0].clone(), output_bytes))
 }
 
-fn archive_input_bytes(archive: &Path, meta: ArchiveMeta) -> Result<u64> {
+/// 一组文件路径的总字节数。/ Total byte size of a set of file paths.
+fn paths_total_bytes(paths: &[PathBuf]) -> Result<u64> {
     let mut total = 0_u64;
-    for volume in archive_volume_paths(archive, meta)? {
+    for path in paths {
         total = total.saturating_add(
-            fs::metadata(&volume)
-                .with_context(|| format!("无法读取归档信息: {}", volume.display()))?
+            fs::metadata(path)
+                .with_context(|| format!("无法读取文件信息: {}", path.display()))?
                 .len(),
         );
     }
     Ok(total)
+}
+
+fn archive_input_bytes(archive: &Path, meta: ArchiveMeta) -> Result<u64> {
+    paths_total_bytes(&archive_volume_paths(archive, meta)?)
 }
 
 /// 组成归档的全部文件——单个文件本身，或经校验的完整分卷链。
@@ -1972,12 +2147,16 @@ fn calculate_archive_hash(archive: &Path, meta: ArchiveMeta) -> Result<String> {
 /// 对文件序列做 BLAKE3 摘要；每读出一块调用 `on_chunk`（调用方在此推进进度/检查中止）。
 /// BLAKE3 over a file sequence; `on_chunk` runs per block so callers can hook
 /// progress reporting and abort checks into the same loop.
-fn hash_file_sequence(paths: &[PathBuf], mut on_chunk: impl FnMut(u64) -> Result<()>) -> Result<String> {
+#[cfg(test)]
+fn hash_file_sequence(
+    paths: &[PathBuf],
+    mut on_chunk: impl FnMut(u64) -> Result<()>,
+) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     for path in paths {
-        let mut file = File::open(path)
-            .with_context(|| format!("无法打开归档文件: {}", path.display()))?;
+        let mut file =
+            File::open(path).with_context(|| format!("无法打开归档文件: {}", path.display()))?;
         loop {
             let read = file
                 .read(&mut buffer)
@@ -2009,44 +2188,29 @@ fn full_error_chain(err: &anyhow::Error) -> String {
     format!("{err:#}")
 }
 
-/// 目录/单文件压缩分发（含参数解析）。
+/// 目录/单文件压缩分发（含参数解析）；返回落盘内容的 BLAKE3 摘要。
 /// Directory/single-file compress dispatch, including parameter resolution.
+/// Returns the BLAKE3 digest of the bytes that hit the disk.
 fn compress_source_to(
     source_is_dir: bool,
     source: &Path,
     output: &Path,
     request: &CompressRequest,
-    reporter: &ProgressReporter,
-    state: Option<&AppState>,
     split_size_mib: Option<u64>,
-) -> Result<()> {
-    let level = request.level.unwrap_or(8).clamp(1, 22);
-    let include_root_dir = request.include_root_dir.unwrap_or(true);
+    job: &CompressJob,
+) -> Result<String> {
     let password = normalize_password(request.password.clone());
-    if source_is_dir {
-        compress_directory(
-            source,
-            output,
-            level,
-            include_root_dir,
-            password.as_deref(),
-            reporter,
-            state,
-            split_size_mib,
-            request.threads,
-        )
+    let hash = Arc::new(Mutex::new(blake3::Hasher::new()));
+    let output_sink =
+        create_output_sink(output, password.as_deref(), split_size_mib, hash.clone())?;
+    let sink = if source_is_dir {
+        compress_directory(source, output_sink, job)?
     } else {
-        compress_file(
-            source,
-            output,
-            level,
-            password.as_deref(),
-            reporter,
-            state,
-            split_size_mib,
-            request.threads,
-        )
-    }
+        compress_file(source, output_sink, job)?
+    };
+    check_abort(job.state)?;
+    sink.finalize()?;
+    Ok(hash_digest(&hash))
 }
 
 /// “压缩后删除源”收尾，统一上报完整根因链。
@@ -2077,11 +2241,11 @@ fn compress_to_count(
     state: Option<&AppState>,
 ) -> Result<u64> {
     let sink = CountingWriter::new(io::sink());
-    let mut encoder = zstd::Encoder::new(sink, level).context("创建 zstd 编码器失败")?;
-    encoder.include_checksum(true).context("启用 zstd 校验失败")?;
-    encoder
-        .multithread(threads)
-        .context("无法开启 zstd 多线程压缩")?;
+    // 与真实压缩路径一致地告知输入大小，基准结果才代表实际表现。
+    // Match the real compress path by pledging the size, so benchmark numbers
+    // reflect production behavior.
+    let data_len = data.len() as u64;
+    let mut encoder = configure_encoder(sink, level, threads, Some(data_len), data_len)?;
 
     // One `write_all(data)` for the whole sample meant "停止" was ignored until
     // the level finished — tens of seconds at level 22. Feed it in chunks and
@@ -2232,33 +2396,106 @@ fn choose_recommended_level(results: &[CompressionLevelReport]) -> Option<u8> {
     Some(best.level)
 }
 
-fn compress_file(
-    source: &Path,
-    output: &Path,
-    level: i32,
-    password: Option<&str>,
-    reporter: &ProgressReporter,
-    state: Option<&AppState>,
-    split_size_mib: Option<u64>,
-    threads: Option<u32>,
+/// 源达到该规模才显式启用长距离匹配（LDM）：低等级默认窗口只有数 MiB，
+/// 大文件中跨远距离的重复只能靠 LDM 找回。22 级已因 windowLog≥27 自动启用，
+/// 这里补的是中低等级 + 大输入的场景。
+/// Only enable long-distance matching explicitly at or above this source
+/// size: low levels default to a window of a few MiB, so distant repeats in
+/// large inputs are lost without it. Level 22 already auto-enables LDM
+/// (windowLog ≥ 27); this covers mid/low levels on large inputs.
+const LDM_MIN_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// LDM 下的 MT 任务尺寸上限：默认 jobSize=4×window（128 MiB 窗口即 512 MiB/任务），
+/// 乘以 worker 数可吞掉数 GiB 内存；钳到 64 MiB 后 16 线程约 2 GiB。
+/// Cap the per-worker job size while LDM is on: the default job is 4×window
+/// (512 MiB each at a 128 MiB window), multiplied by worker count into
+/// several GiB; clamping to 64 MiB keeps a 16-thread run around ~2 GiB.
+const LDM_MT_JOB_BYTES: u32 = 64 * 1024 * 1024;
+
+/// 为大输入启用 LDM。窗口保持解码器默认上限 128 MiB——更大的窗口会产出
+/// 默认流式解码器拒收的帧，不值得为这点距离破坏兼容性。
+/// Enable LDM for large inputs. The window stays at the 128 MiB decoder
+/// default — anything larger produces frames a stock streaming decoder rejects.
+fn enable_ldm_if_large<W: Write>(
+    encoder: &mut zstd::Encoder<'_, W>,
+    source_bytes: u64,
+    threads: u32,
 ) -> Result<()> {
+    if source_bytes < LDM_MIN_SOURCE_BYTES {
+        return Ok(());
+    }
+    encoder
+        .long_distance_matching(true)
+        .context("启用长距离匹配失败")?;
+    if threads > 1 {
+        encoder
+            .set_parameter(zstd::zstd_safe::CParameter::JobSize(LDM_MT_JOB_BYTES))
+            .context("设置压缩任务大小失败")?;
+    }
+    Ok(())
+}
+
+/// 统一装配编码器：校验和 + 多线程 + 可选 pledged size + 大输入 LDM。
+/// `ldm_hint` 是源体量估计——目录场景 tar 流长不可预知，用源字节数代替。
+/// Assemble the encoder uniformly: checksum + multithreading + optional
+/// pledged source size + LDM for large inputs. `ldm_hint` estimates the
+/// source size — for directories the tar stream length is unknowable, so
+/// the raw source byte count stands in.
+fn configure_encoder<W: Write>(
+    sink: W,
+    level: i32,
+    threads: u32,
+    pledged_src: Option<u64>,
+    ldm_hint: u64,
+) -> Result<zstd::Encoder<'static, W>> {
+    let mut encoder = zstd::Encoder::new(sink, level).context("创建 zstd 编码器失败")?;
+    encoder
+        .include_checksum(true)
+        .context("启用 zstd 校验失败")?;
+    encoder
+        .multithread(threads)
+        .context("无法开启 zstd 多线程压缩")?;
+    if let Some(size) = pledged_src {
+        encoder
+            .set_pledged_src_size(Some(size))
+            .context("设置源大小失败")?;
+    }
+    enable_ldm_if_large(&mut encoder, ldm_hint, threads)?;
+    Ok(encoder)
+}
+
+/// 压缩单文件到任意 `Write` 汇；排空 zstd 后把汇交还调用方收尾。
+/// Compress a single file into an arbitrary `Write` sink; after draining the
+/// zstd workers the sink is handed back so the caller can finish it.
+fn compress_file<W: Write>(source: &Path, output_sink: W, job: &CompressJob) -> Result<W> {
     let access_path = fs_access_path(source)
         .with_context(|| format!("无法准备源文件路径: {}", source.display()))?;
     let input = File::open(&access_path)
         .with_context(|| format!("无法打开源文件: {}", source.display()))?;
+    let source_len = input
+        .metadata()
+        .with_context(|| format!("无法读取源文件信息: {}", source.display()))?
+        .len();
     let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, input);
 
-    let output_sink = create_output_sink(output, password, split_size_mib)?;
-    let mut encoder = zstd::Encoder::new(output_sink, level).context("创建 zstd 编码器失败")?;
-
-    encoder.include_checksum(true).context("启用 zstd 校验失败")?;
-    encoder
-        .multithread(resolve_threads(threads))
-        .context("无法开启 zstd 多线程压缩")?;
+    let worker_count = resolve_threads(job.threads);
+    // 预先告知输入大小：帧头携带 content size，且小源能把窗口参数钳到合理范围。
+    // 若文件在压缩过程中被改动，finish 会因大小不符报错——宁可报错也不产出静默截断的归档。
+    // Pledge the input size upfront: the frame header then carries the content
+    // size, and small sources get window parameters clamped to a sane range.
+    // If the file changes size mid-read, finish() reports the mismatch —
+    // failing loudly beats emitting a silently truncated archive.
+    let mut encoder = configure_encoder(
+        output_sink,
+        job.level,
+        worker_count,
+        Some(source_len),
+        source_len,
+    )?;
 
     let mut buf = vec![0_u8; 512 * 1024];
     loop {
-        if let Some(s) = state {
+        if let Some(s) = job.state {
             if s.is_aborted() {
                 bail!("用户已终止任务");
             }
@@ -2272,35 +2509,35 @@ fn compress_file(
         encoder
             .write_all(&buf[..count])
             .context("压缩过程中写入失败")?;
-        reporter.advance(count as u64);
+        job.reporter.advance(count as u64);
     }
 
-    reporter.phase("finalizing");
-    let sink = encoder.finish().context("无法完成压缩输出")?;
-    check_abort(state)?;
-    sink.finalize()?;
-
-    Ok(())
+    job.reporter.phase("finalizing");
+    encoder.finish().context("无法完成压缩输出")
 }
 
-fn compress_directory(
-    source: &Path,
-    output: &Path,
+/// 压缩任务的共享参数：等级、tar 根目录开关、源大小（LDM 预判用）、进度与取消。
+/// Shared parameters for a compression job: level, tar root-dir switch, source
+/// size (for the LDM hint), progress and abort context.
+pub(crate) struct CompressJob<'a> {
     level: i32,
     include_root_dir: bool,
-    password: Option<&str>,
-    reporter: &ProgressReporter,
-    state: Option<&AppState>,
-    split_size_mib: Option<u64>,
+    source_bytes: u64,
+    reporter: &'a ProgressReporter,
+    state: Option<&'a AppState>,
     threads: Option<u32>,
-) -> Result<()> {
-    let output_sink = create_output_sink(output, password, split_size_mib)?;
-    let mut encoder = zstd::Encoder::new(output_sink, level).context("创建 zstd 编码器失败")?;
+}
 
-    encoder.include_checksum(true).context("启用 zstd 校验失败")?;
-    encoder
-        .multithread(resolve_threads(threads))
-        .context("无法开启 zstd 多线程压缩")?;
+/// 压缩目录到任意 `Write` 汇（tar.zst）；返回排空后的汇。
+/// `source_bytes` 仅用于 LDM 预判——tar 流含元数据开销，长度无法精确预知，
+/// 因此不设 pledged size（不匹配会在 finish 时报错）。
+/// Compress a directory (tar.zst) into an arbitrary `Write` sink; returns the
+/// drained sink. `source_bytes` feeds only the LDM hint — a tar stream carries
+/// metadata overhead so its exact length is unknowable, and a wrong pledged
+/// size fails at finish().
+fn compress_directory<W: Write>(source: &Path, output_sink: W, job: &CompressJob) -> Result<W> {
+    let worker_count = resolve_threads(job.threads);
+    let encoder = configure_encoder(output_sink, job.level, worker_count, None, job.source_bytes)?;
 
     let mut tar_builder = tar::Builder::new(encoder);
     let root_name = source
@@ -2313,7 +2550,7 @@ fn compress_directory(
     let walk_source = fs_access_path(source)
         .with_context(|| format!("无法准备源目录路径: {}", source.display()))?;
 
-    if include_root_dir {
+    if job.include_root_dir {
         tar_builder
             .append_dir(Path::new(&root_name), &walk_source)
             .with_context(|| format!("写入根目录失败: {}", source.display()))?;
@@ -2332,7 +2569,7 @@ fn compress_directory(
         .into_iter()
     {
         let entry = entry.context("遍历待压缩目录失败，归档已中止")?;
-        if let Some(s) = state {
+        if let Some(s) = job.state {
             if s.is_aborted() {
                 bail!("用户已终止任务");
             }
@@ -2343,7 +2580,7 @@ fn compress_directory(
             .strip_prefix(&walk_source)
             .with_context(|| format!("无法计算相对路径: {}", path.display()))?;
 
-        let archive_name = if include_root_dir {
+        let archive_name = if job.include_root_dir {
             Path::new(&root_name).join(rel)
         } else {
             rel.to_path_buf()
@@ -2377,18 +2614,20 @@ fn compress_directory(
         }
 
         if entry.file_type().is_file() {
-            append_file_with_progress(&mut tar_builder, path, &archive_name, reporter, state)?;
+            append_file_with_progress(
+                &mut tar_builder,
+                path,
+                &archive_name,
+                job.reporter,
+                job.state,
+            )?;
         }
     }
 
     tar_builder.finish().context("tar 归档收尾失败")?;
     let encoder = tar_builder.into_inner().context("无法获取压缩编码器")?;
-    reporter.phase("finalizing");
-    let sink = encoder.finish().context("无法完成目录压缩输出")?;
-    check_abort(state)?;
-    sink.finalize()?;
-
-    Ok(())
+    job.reporter.phase("finalizing");
+    encoder.finish().context("无法完成目录压缩输出")
 }
 
 fn append_file_with_progress<W: Write>(
@@ -2411,8 +2650,8 @@ fn append_file_with_progress<W: Write>(
     header.set_cksum();
 
     let reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
-    let mut progress_reader = AbortableReader::new(
-        ProgressReader::new(reader, reporter.clone()), state);
+    let mut progress_reader =
+        AbortableReader::new(ProgressReader::new(reader, reporter.clone()), state);
 
     tar_builder
         .append_data(&mut header, archive_name, &mut progress_reader)
@@ -2469,8 +2708,7 @@ fn decompress_tar_from_reader<R: Read>(
         .with_context(|| format!("解包归档失败: {}", output_dir.display()))?;
     // tar 的结束标记早于 zstd/加密流结尾，提交前必须验证剩余数据。
     // TAR EOF precedes the outer stream EOF; validate the tail before commit.
-    io::copy(&mut archive.into_inner(), &mut io::sink())
-        .context("验证归档尾部失败")?;
+    io::copy(&mut archive.into_inner(), &mut io::sink()).context("验证归档尾部失败")?;
     Ok(())
 }
 
@@ -2626,26 +2864,34 @@ fn sync_directory(dir: &Path) {
 }
 
 fn output_parent(path: &Path) -> &Path {
-    path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 /// 逐段解析已有祖先，保留尚未创建的后缀；符号链接和 .. 使用同一命名空间。
 /// Resolve existing ancestors component by component, retaining the future suffix.
 fn resolve_future_path(path: &Path) -> Result<PathBuf> {
     use std::path::Component;
-    let absolute = if path.is_absolute() { path.to_path_buf() }
-        else { std::env::current_dir()?.join(path) };
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
     let mut resolved = PathBuf::new();
     for part in absolute.components() {
         match part {
-            Component::CurDir => {},
-            Component::ParentDir => { resolved.pop(); },
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
             other => {
                 resolved.push(other.as_os_str());
                 match fs::symlink_metadata(&resolved) {
-                    Ok(_) => { resolved = fs::canonicalize(&resolved)
-                        .context("无法解析输出路径")?; },
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+                    Ok(_) => {
+                        resolved = fs::canonicalize(&resolved).context("无法解析输出路径")?;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                     Err(e) => return Err(e).context("无法检查输出路径"),
                 }
             }
@@ -2660,8 +2906,8 @@ fn validate_compress_paths(
     kind: OutputKind,
     split_size: Option<u64>,
 ) -> Result<()> {
-    let source_access = fs_access_path(source)
-        .with_context(|| format!("无法准备源路径: {}", source.display()))?;
+    let source_access =
+        fs_access_path(source).with_context(|| format!("无法准备源路径: {}", source.display()))?;
     let source = fs::canonicalize(&source_access)
         .with_context(|| format!("无法解析源路径: {}", source.display()))?;
     let output_abs = resolve_future_path(output)?;
@@ -2679,11 +2925,7 @@ fn validate_compress_paths(
 /// 待创建目标已存在时拒绝启动。`File::create` 会原地截断，必须先显式检查。
 /// Refuse to start when anything we are about to create already exists.
 /// `File::create` truncates in place, so check explicitly first.
-fn ensure_output_available(
-    output: &Path,
-    kind: OutputKind,
-    split_size: Option<u64>,
-) -> Result<()> {
+fn ensure_output_available(output: &Path, kind: OutputKind, split_size: Option<u64>) -> Result<()> {
     let targets: Vec<PathBuf> = if split_enabled(split_size) {
         // 同位置上次分卷运行的残留：覆写 `.001` 而留下 `.002`+ 会产生看似完整、实则解码为垃圾的链，故任何存活分卷都按冲突处理。
         // Leftovers from a previous split run in the same spot: writing over
@@ -2777,12 +3019,18 @@ fn resolve_compress_output(
 
     match output_kind {
         OutputKind::Archive => {
-            let name = candidate.file_name().context("输出名称为空")?.to_string_lossy();
+            let name = candidate
+                .file_name()
+                .context("输出名称为空")?
+                .to_string_lossy();
             let base = strip_suffix_ci(&name, ".enc");
             let base = strip_suffix_ci(strip_suffix_ci(base, ".tar.zst"), ".zst");
             let is_dir = fs::metadata(fs_access_path(source)?)?.is_dir();
             let suffix = if is_dir { ".tar.zst" } else { ".zst" };
-            candidate = candidate.with_file_name(format!("{base}{suffix}{}", if encrypted { ".enc" } else { "" }));
+            candidate = candidate.with_file_name(format!(
+                "{base}{suffix}{}",
+                if encrypted { ".enc" } else { "" }
+            ));
         }
         OutputKind::SfxExe => {
             candidate = ensure_suffix(candidate, ".exe");
@@ -2848,18 +3096,10 @@ fn resolve_decompress_output(
     match output {
         Some(path) => {
             let candidate = PathBuf::from(path.trim());
-            match meta.kind {
-                ArchiveKind::TarZst => {
-                    if candidate.is_dir() { Ok(candidate.join(default_name)) }
-                    else { Ok(candidate) }
-                },
-                ArchiveKind::Zst => {
-                    if candidate.exists() && candidate.is_dir() {
-                        Ok(candidate.join(default_name))
-                    } else {
-                        Ok(candidate)
-                    }
-                }
+            if candidate.is_dir() {
+                Ok(candidate.join(default_name))
+            } else {
+                Ok(candidate)
             }
         }
         None => {
@@ -2877,30 +3117,28 @@ fn default_decompress_name(archive: &Path, meta: ArchiveMeta) -> Result<String> 
         .to_string_lossy();
 
     let base = if meta.encrypted {
-        strip_suffix_ci(&file_name, ".enc").to_string()
+        strip_suffix_ci(&file_name, ".enc")
     } else {
-        file_name.to_string()
+        &file_name
     };
 
-    match meta.kind {
-        ArchiveKind::TarZst => {
-            // 默认输出名直接取压缩包原名；重名时由输出保护统一拒绝，
-            // 并提示用户自行更改，而不是自动追加后缀。
-            // Default output name is the archive's own name; collisions are rejected by the
-            // output guard, prompting the user to rename manually rather than auto-suffixing.
-            let stem = strip_suffix_ci(&base, ".tar.zst");
-            Ok(stem.to_string())
-        }
-        ArchiveKind::Zst => {
-            let stem = strip_suffix_ci(&base, ".zst");
-            Ok(stem.to_string())
-        }
-    }
+    // 默认输出名直接取压缩包原名；重名时由输出保护统一拒绝，
+    // 并提示用户自行更改，而不是自动追加后缀。
+    // Default output name is the archive's own name; collisions are rejected by the
+    // output guard, prompting the user to rename manually rather than auto-suffixing.
+    let suffix = match meta.kind {
+        ArchiveKind::TarZst => ".tar.zst",
+        ArchiveKind::Zst => ".zst",
+    };
+    Ok(strip_suffix_ci(base, suffix).to_string())
 }
 
 fn strip_suffix_ci<'a>(name: &'a str, suffix: &str) -> &'a str {
-    if name.to_ascii_lowercase().ends_with(suffix) { &name[..name.len() - suffix.len()] }
-    else { name }
+    if name.to_ascii_lowercase().ends_with(suffix) {
+        &name[..name.len() - suffix.len()]
+    } else {
+        name
+    }
 }
 
 fn normalize_password(raw: Option<String>) -> Option<SecretString> {
@@ -2934,10 +3172,16 @@ fn fs_access_path(path: &Path) -> io::Result<PathBuf> {
 
     // GetFullPathName（std::path::absolute）会先把 NUL 等名称变成设备路径。
     // Prefix before OS normalization, otherwise DOS names become device paths.
-    let absolute = if path.is_absolute() { path.to_path_buf() }
-        else if matches!(path.components().next(), Some(Component::Prefix(_))) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "请使用完整驱动器路径"));
-        } else { std::env::current_dir()?.join(path) };
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else if matches!(path.components().next(), Some(Component::Prefix(_))) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "请使用完整驱动器路径",
+        ));
+    } else {
+        std::env::current_dir()?.join(path)
+    };
     let mut components = absolute.components();
     let Some(Component::Prefix(prefix_component)) = components.next() else {
         return Ok(absolute);
@@ -2960,7 +3204,9 @@ fn fs_access_path(path: &Path) -> io::Result<PathBuf> {
     for component in components {
         match component {
             Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
-            Component::ParentDir => { verbatim.pop(); },
+            Component::ParentDir => {
+                verbatim.pop();
+            }
             Component::Normal(part) => verbatim.push(part),
         }
     }
@@ -3019,869 +3265,7 @@ pub fn run() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    fn deterministic_bytes(size: usize) -> Vec<u8> {
-        (0..size).map(|i| ((i * 131 + 17) % 251) as u8).collect()
-    }
-
-    fn pseudo_random_bytes(size: usize) -> Vec<u8> {
-        let mut state = 0x1234_5678_9abc_def0_u64;
-        let mut bytes = Vec::with_capacity(size);
-        for _ in 0..size {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            bytes.push((state & 0xff) as u8);
-        }
-        bytes
-    }
-
-    fn write_file(path: &Path, bytes: &[u8]) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent");
-        }
-        fs::write(path, bytes).expect("write file");
-    }
-
-    fn collect_file_map(root: &Path) -> BTreeMap<String, Vec<u8>> {
-        let mut map = BTreeMap::new();
-        for entry in WalkDir::new(root)
-            .min_depth(1)
-            .into_iter()
-            .filter_map(std::result::Result::ok)
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-
-            let rel = entry
-                .path()
-                .strip_prefix(root)
-                .expect("strip prefix")
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            map.insert(rel, fs::read(entry.path()).expect("read file"));
-        }
-        map
-    }
-
-    fn assert_dirs_equal(expected: &Path, actual: &Path) {
-        assert_eq!(collect_file_map(expected), collect_file_map(actual));
-    }
-
-    fn archive_request(
-        source: &Path,
-        output: &Path,
-        level: i32,
-        include_root_dir: bool,
-        password: Option<&str>,
-        split_size_mib: Option<u64>,
-    ) -> CompressRequest {
-        CompressRequest {
-            source_path: path_to_string(source),
-            output_path: Some(path_to_string(output)),
-            output_kind: Some(OutputKind::Archive),
-            level: Some(level),
-            include_root_dir: Some(include_root_dir),
-            password: password.map(str::to_string),
-            split_size_mib,
-            enable_logging: Some(false),
-            delete_source_after: Some(false),
-            threads: Some(1),
-        }
-    }
-
-    #[test]
-    fn encrypted_roundtrip_file_sizes_and_types() {
-        let sizes = [
-            0_usize,
-            1,
-            31,
-            4 * 1024,
-            ENC_CHUNK_SIZE - 1,
-            ENC_CHUNK_SIZE,
-            ENC_CHUNK_SIZE + 1,
-            ENC_CHUNK_SIZE * 3 + 123,
-        ];
-
-        for (idx, size) in sizes.into_iter().enumerate() {
-            let temp = tempfile::tempdir().expect("temp dir");
-            let source = temp.path().join(format!("data_{idx}.bin"));
-            let archive = temp.path().join(format!("data_{idx}.zst.enc"));
-            let output = temp.path().join(format!("out_{idx}.bin"));
-
-            let payload = deterministic_bytes(size);
-            write_file(&source, &payload);
-
-            compress_archive_sync(
-                archive_request(&source, &archive, 8, true, Some("Strong#Pass123"), None),
-                None,
-                None,
-            )
-            .expect("compress encrypted");
-
-            decompress_archive_sync(
-                DecompressRequest {
-                    archive_path: path_to_string(&archive),
-                    output_path: Some(path_to_string(&output)),
-                    password: Some("Strong#Pass123".to_string()),
-                },
-                None,
-                None,
-            )
-            .expect("decompress encrypted");
-
-            let restored = fs::read(&output).expect("read output");
-            assert_eq!(restored, payload, "size={size}");
-        }
-    }
-
-    #[test]
-    fn encrypted_roundtrip_directory_include_root_variants() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_dir = temp.path().join("project_src");
-        fs::create_dir_all(&source_dir).expect("create source dir");
-
-        write_file(&source_dir.join("empty.txt"), b"");
-        write_file(&source_dir.join("plain.txt"), b"hello encrypted world");
-        write_file(&source_dir.join("config.json"), br#"{"k":1,"v":"x"}"#);
-        write_file(
-            &source_dir.join("nested/bin.dat"),
-            &deterministic_bytes(131_072),
-        );
-        write_file(
-            &source_dir.join("nested/unicode/中文-emoji.txt"),
-            "你好, encryption ✓".as_bytes(),
-        );
-        write_file(
-            &source_dir.join("nested/huge/chunk.bin"),
-            &deterministic_bytes(ENC_CHUNK_SIZE * 2 + 77),
-        );
-
-        for include_root in [true, false] {
-            let archive = temp.path().join(format!("dir_{include_root}.tar.zst.enc"));
-            let out_dir = temp.path().join(format!("out_{include_root}"));
-
-            compress_archive_sync(
-                archive_request(
-                    &source_dir,
-                    &archive,
-                    6,
-                    include_root,
-                    Some("Dir#Secure987"),
-                    None,
-                ),
-                None,
-                None,
-            )
-            .expect("compress dir encrypted");
-
-            decompress_archive_sync(
-                DecompressRequest {
-                    archive_path: path_to_string(&archive),
-                    output_path: Some(path_to_string(&out_dir)),
-                    password: Some("Dir#Secure987".to_string()),
-                },
-                None,
-                None,
-            )
-            .expect("decompress dir encrypted");
-
-            let actual_root = if include_root {
-                out_dir.join("project_src")
-            } else {
-                out_dir.clone()
-            };
-            assert_dirs_equal(&source_dir, &actual_root);
-        }
-    }
-
-    #[test]
-    fn encrypted_archive_rejects_wrong_password() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source = temp.path().join("secret.bin");
-        let archive = temp.path().join("secret.zst.enc");
-        let output = temp.path().join("secret.out");
-
-        write_file(&source, &deterministic_bytes(8192));
-
-        compress_archive_sync(
-            archive_request(&source, &archive, 5, true, Some("CorrectPassword"), None),
-            None,
-            None,
-        )
-        .expect("compress encrypted");
-
-        let err = decompress_archive_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&archive),
-                output_path: Some(path_to_string(&output)),
-                password: Some("WrongPassword".to_string()),
-            },
-            None,
-            None,
-        )
-        .expect_err("wrong password must fail");
-
-        assert!(!err.to_string().is_empty());
-    }
-
-    #[test]
-    fn plain_roundtrip_still_works_after_encryption_feature() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source = temp.path().join("plain.bin");
-        let archive = temp.path().join("plain.bin.zst");
-        let output = temp.path().join("plain.out");
-
-        let payload = deterministic_bytes(2 * 1024 * 1024 + 13);
-        write_file(&source, &payload);
-
-        compress_archive_sync(
-            archive_request(&source, &archive, 9, true, None, None),
-            None,
-            None,
-        )
-        .expect("compress plain");
-
-        decompress_archive_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&archive),
-                output_path: Some(path_to_string(&output)),
-                password: None,
-            },
-            None,
-            None,
-        )
-        .expect("decompress plain");
-
-        assert_eq!(fs::read(output).expect("read output"), payload);
-    }
-
-    #[test]
-    fn literal_windows_reserved_name_roundtrips() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_dir = temp.path().join("reserved_source");
-        fs::create_dir_all(&source_dir).expect("create source dir");
-
-        let reserved_source = source_dir.join("NUL");
-        let reserved_source_access = fs_access_path(&reserved_source).expect("source access path");
-        fs::write(&reserved_source_access, b"literal NUL filename").expect("write NUL file");
-
-        let archive = temp.path().join("reserved.tar.zst");
-        compress_archive_sync(
-            archive_request(&source_dir, &archive, 3, false, None, None),
-            None,
-            None,
-        )
-        .expect("compress reserved name");
-
-        let output = temp.path().join("reserved_output");
-        decompress_archive_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&archive),
-                output_path: Some(path_to_string(&output)),
-                password: None,
-            },
-            None,
-            None,
-        )
-        .expect("decompress reserved name");
-
-        let reserved_output = output.join("NUL");
-        let reserved_output_access = fs_access_path(&reserved_output).expect("output access path");
-        assert_eq!(
-            fs::read(&reserved_output_access).expect("read restored NUL file"),
-            b"literal NUL filename"
-        );
-
-        // Windows 上常规递归清理无法寻址字面 NUL 条目，需经 verbatim 命名空间删除特殊文件。
-        // On Windows, ordinary recursive cleanup cannot address a literal NUL
-        // entry, so remove the special files through the verbatim namespace.
-        fs::remove_file(&reserved_source_access).expect("remove source NUL file");
-        fs::remove_file(&reserved_output_access).expect("remove restored NUL file");
-    }
-
-    #[test]
-    fn split_archive_reports_first_volume_and_roundtrips() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source = temp.path().join("split.bin");
-        let archive = temp.path().join("split.bin.zst");
-        let output = temp.path().join("split.out");
-
-        let payload = pseudo_random_bytes(3 * 1024 * 1024 + 113);
-        write_file(&source, &payload);
-
-        let report = compress_archive_sync(
-            archive_request(&source, &archive, 1, true, None, Some(1)),
-            None,
-            None,
-        )
-        .expect("compress split archive");
-
-        let first_volume = temp.path().join("split.bin.zst.001");
-        let second_volume = temp.path().join("split.bin.zst.002");
-        assert_eq!(report.output_path, path_to_string(&first_volume));
-        assert!(first_volume.exists());
-        assert!(second_volume.exists());
-        assert_eq!(report.blake3_hash, Some(calculate_archive_hash(&first_volume, detect_archive_meta(&first_volume).unwrap()).unwrap()));
-
-        let volumes = existing_volume_paths(&archive).expect("list split volumes");
-        assert!(volumes.len() > 1);
-        let expected_size: u64 = volumes
-            .iter()
-            .map(|path| fs::metadata(path).unwrap().len())
-            .sum();
-        assert_eq!(report.output_bytes, expected_size);
-
-        decompress_archive_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&first_volume),
-                output_path: Some(path_to_string(&output)),
-                password: None,
-            },
-            None,
-            None,
-        )
-        .expect("decompress split archive");
-
-        assert_eq!(fs::read(output).expect("read output"), payload);
-    }
-
-    #[test]
-    fn benchmark_compression_returns_recommendation() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("blob.bin");
-        write_file(&source_path, &deterministic_bytes(2 * 1024 * 1024));
-
-        let report = benchmark_compression_sync(
-            BenchmarkRequest {
-                source_path: path_to_string(&source_path),
-                min_level: Some(1),
-                max_level: Some(4),
-                iterations: Some(1),
-                sample_size_mib: Some(16),
-                threads: Some(1),
-            },
-            None,
-        )
-        .expect("benchmark");
-
-        assert_eq!(report.results.len(), 4);
-        assert!((1..=4).contains(&report.recommended_level));
-        assert!(report.sample_bytes > 0);
-    }
-
-    // --- 加密层 Encryption layer ---
-
-    #[test]
-    fn legacy_zenc0001_archives_still_decrypt() {
-        // 前向兼容防护：`ZENC0002` 把 Argon2 参数写入头。v1 归档无此块，读取方必须回退 `LEGACY_KDF` 并在正确偏移读取密文。
-        // Forward compatibility guard: `ZENC0002` writes its Argon2 parameters
-        // into the header. A v1 archive has no such block, so the reader must
-        // fall back to `LEGACY_KDF` and read the ciphertext at the right offset.
-        let payload = pseudo_random_bytes(600 * 1024);
-        let password = "legacy-pw";
-
-        let mut encrypted = Vec::new();
-        {
-            let mut salt = [0_u8; ENC_SALT_LEN];
-            let mut nonce_prefix = [0_u8; ENC_NONCE_PREFIX_LEN];
-            OsRng.fill_bytes(&mut salt);
-            OsRng.fill_bytes(&mut nonce_prefix);
-
-            encrypted.extend_from_slice(ENC_MAGIC_V1);
-            encrypted.extend_from_slice(&salt);
-            encrypted.extend_from_slice(&nonce_prefix);
-
-            let key = derive_encryption_key(password, &salt, LEGACY_KDF).expect("derive");
-            let cipher = key.cipher();
-            for (index, chunk) in payload.chunks(ENC_CHUNK_SIZE).enumerate() {
-                let nonce = make_nonce(nonce_prefix, index as u64);
-                let mut buffer = chunk.to_vec();
-                cipher
-                    .encrypt_in_place(XNonce::from_slice(&nonce), &[], &mut buffer)
-                    .expect("encrypt");
-                encrypted.extend_from_slice(&(buffer.len() as u32).to_be_bytes());
-                encrypted.extend_from_slice(&buffer);
-            }
-            encrypted.extend_from_slice(&0_u32.to_be_bytes());
-        }
-
-        let mut reader =
-            EncryptedReader::new(io::Cursor::new(encrypted), password).expect("open v1 reader");
-        let mut decrypted = Vec::new();
-        reader.read_to_end(&mut decrypted).expect("read v1 payload");
-        assert_eq!(decrypted, payload);
-    }
-
-    #[test]
-    fn zenc0002_header_carries_kdf_params() {
-        let mut sink = Vec::new();
-        {
-            let mut writer = EncryptedWriter::new(&mut sink, "pw").expect("writer");
-            writer.write_all(b"hello").expect("write");
-            writer.finish().expect("finish");
-        }
-
-        assert_eq!(&sink[..8], ENC_MAGIC_V2);
-        let kdf_offset = 8 + ENC_SALT_LEN + ENC_NONCE_PREFIX_LEN;
-        let mut raw = [0_u8; 12];
-        raw.copy_from_slice(&sink[kdf_offset..kdf_offset + 12]);
-        assert_eq!(KdfParams::from_bytes(raw).expect("parse kdf"), CURRENT_KDF);
-    }
-
-    #[test]
-    fn hostile_kdf_params_are_rejected() {
-        // KDF 参数存入头意味着恶意归档可让 `derive` 分配荒谬内存；边界检查必须在 Argon2 之前拒绝。
-        // Storing the KDF parameters in the header means a crafted archive could
-        // ask us to allocate an absurd amount of memory during `derive`. The
-        // bounds check must reject it before Argon2 ever sees it.
-        let huge = KdfParams {
-            m_cost_kib: u32::MAX,
-            t_cost: 2,
-            parallelism: 1,
-        };
-        assert!(KdfParams::from_bytes(huge.to_bytes()).is_err());
-
-        let zeroed = KdfParams {
-            m_cost_kib: 0,
-            t_cost: 0,
-            parallelism: 0,
-        };
-        assert!(KdfParams::from_bytes(zeroed.to_bytes()).is_err());
-    }
-
-    #[test]
-    fn absurd_chunk_length_is_rejected_without_allocating() {
-        // 4 字节长度前缀完全受攻击者控制，必须在分配前校验边界。
-        // A 4-byte length prefix is fully attacker-controlled and must be
-        // bounded before allocation.
-        let mut sink = Vec::new();
-        {
-            let mut writer = EncryptedWriter::new(&mut sink, "pw").expect("writer");
-            writer.write_all(b"payload").expect("write");
-            writer.finish().expect("finish");
-        }
-
-        let header_len = 8 + ENC_SALT_LEN + ENC_NONCE_PREFIX_LEN + 12;
-        let mut forged = sink[..header_len].to_vec();
-        forged.extend_from_slice(&u32::MAX.to_be_bytes());
-        forged.extend_from_slice(&[0_u8; 64]);
-
-        let mut reader = EncryptedReader::new(io::Cursor::new(forged), "pw").expect("reader");
-        let mut out = Vec::new();
-        let err = reader.read_to_end(&mut out).expect_err("must reject");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("加密分块长度非法"));
-    }
-
-    // --- 输出保护 Output guard ---
-
-    #[test]
-    fn compress_refuses_to_overwrite_existing_output() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("input.bin");
-        write_file(&source_path, &deterministic_bytes(4096));
-
-        let output = temp.path().join("precious.tar.zst");
-        write_file(&output, b"do not destroy me");
-
-        let err = compress_archive_sync(
-            archive_request(&source_path, &output, 3, true, None, None),
-            None,
-            None,
-        )
-        .expect_err("must refuse");
-
-        assert!(err.to_string().contains("输出路径已存在"));
-        assert_eq!(fs::read(&output).expect("read output"), b"do not destroy me");
-    }
-
-    #[test]
-    fn split_compress_refuses_to_overwrite_existing_volume() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("input.bin");
-        write_file(&source_path, &pseudo_random_bytes(512 * 1024));
-
-        let output = temp.path().join("bundle.tar.zst");
-        let stale_second = temp.path().join("bundle.tar.zst.002");
-        write_file(&stale_second, b"stale volume from an unrelated archive");
-
-        let err = compress_archive_sync(
-            archive_request(&source_path, &output, 3, true, None, Some(1)),
-            None,
-            None,
-        )
-        .expect_err("must refuse");
-
-        assert!(err.to_string().contains("输出路径已存在"));
-        assert!(stale_second.exists());
-    }
-
-    // --- 分卷链 Volume chain ---
-
-    #[test]
-    fn volume_base_path_strips_any_index() {
-        assert_eq!(
-            volume_base_path(Path::new("/tmp/a.tar.zst.003")),
-            PathBuf::from("/tmp/a.tar.zst")
-        );
-        assert_eq!(
-            volume_base_path(Path::new("/tmp/a.tar.zst.001")),
-            PathBuf::from("/tmp/a.tar.zst")
-        );
-        // 非分卷后缀：保持原样 / Not a volume suffix: must be left alone.
-        assert_eq!(
-            volume_base_path(Path::new("/tmp/a.tar.zst")),
-            PathBuf::from("/tmp/a.tar.zst")
-        );
-    }
-
-    #[test]
-    fn decompress_accepts_any_volume_and_detects_gaps() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("payload.bin");
-        let payload = pseudo_random_bytes(3 * 1024 * 1024);
-        write_file(&source_path, &payload);
-
-        let archive = temp.path().join("payload.bin.zst");
-        compress_archive_sync(
-            archive_request(&source_path, &archive, 3, true, None, Some(1)),
-            None,
-            None,
-        )
-        .expect("compress split");
-
-        let volumes = existing_volume_paths(&archive).expect("volumes");
-        assert!(
-            volumes.len() >= 3,
-            "expected several volumes, got {}",
-            volumes.len()
-        );
-
-        let output = temp.path().join("restored.bin");
-        decompress_archive_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&volumes[2]),
-                output_path: Some(path_to_string(&output)),
-                password: None,
-            },
-            None,
-            None,
-        )
-        .expect("decompress from middle volume");
-        assert_eq!(fs::read(&output).expect("read output"), payload);
-
-        // 链上的空洞必须点名报出，不能静默截断 / A hole in the chain must be named, not silently truncated.
-        fs::remove_file(&volumes[1]).expect("remove volume 2");
-        let err = decompress_archive_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&volumes[0]),
-                output_path: Some(path_to_string(&temp.path().join("restored2.bin"))),
-                password: None,
-            },
-            None,
-            None,
-        )
-        .expect_err("gap must be detected");
-        assert!(
-            err.to_string().contains("缺少第 2 卷"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    fn split_archive_hash_covers_every_volume() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("payload.bin");
-        write_file(&source_path, &pseudo_random_bytes(3 * 1024 * 1024));
-
-        let archive = temp.path().join("payload.bin.zst");
-        compress_archive_sync(
-            archive_request(&source_path, &archive, 3, true, None, Some(1)),
-            None,
-            None,
-        )
-        .expect("compress split");
-
-        let volumes = existing_volume_paths(&archive).expect("volumes");
-        assert!(volumes.len() >= 2);
-
-        let meta = detect_archive_meta(&volumes[0]).expect("meta");
-        let whole = calculate_archive_hash(&volumes[0], meta).expect("hash");
-        let first_only = calculate_file_hash(&volumes[0]).expect("hash first");
-        assert_ne!(
-            whole, first_only,
-            "hash must cover the whole chain, not just .001"
-        );
-
-        // 通过拼接各分卷独立复现 / Reproduce it independently by concatenating the volumes.
-        let mut expected = blake3::Hasher::new();
-        for volume in &volumes {
-            expected.update(&fs::read(volume).expect("read volume"));
-        }
-        assert_eq!(whole, expected.finalize().to_hex().to_string());
-    }
-
-    #[test]
-    fn multi_volume_writer_rotates_without_degrading_to_one_byte_writes() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let base = temp.path().join("chunked.bin");
-        let payload = deterministic_bytes(5 * 1024 * 1024);
-
-        {
-            let mut writer = MultiVolumeWriter::new(base.clone(), 1);
-            writer.write_all(&payload).expect("write");
-            writer.flush().expect("flush");
-        }
-
-        let volumes = existing_volume_paths(&base).expect("volumes");
-        assert_eq!(volumes.len(), 5);
-        for volume in &volumes {
-            assert_eq!(fs::metadata(volume).expect("meta").len(), 1024 * 1024);
-        }
-
-        let mut rejoined = Vec::new();
-        for volume in &volumes {
-            rejoined.extend_from_slice(&fs::read(volume).expect("read"));
-        }
-        assert_eq!(rejoined, payload);
-    }
-
-    #[test]
-    fn multi_volume_writer_survives_absurd_volume_size() {
-        // `volume_limit_mib * 1024 * 1024` 以饱和运算处理，超大上限等价于“单个超大分卷”。
-        // `volume_limit_mib * 1024 * 1024` saturates, so an absurd limit is
-        // equivalent to "one huge volume".
-        let temp = tempfile::tempdir().expect("temp dir");
-        let base = temp.path().join("huge.bin");
-        let payload = deterministic_bytes(64 * 1024);
-
-        {
-            let mut writer = MultiVolumeWriter::new(base.clone(), u64::MAX);
-            writer.write_all(&payload).expect("write");
-            writer.flush().expect("flush");
-        }
-
-        let volumes = existing_volume_paths(&base).expect("volumes");
-        assert_eq!(volumes.len(), 1);
-        assert_eq!(fs::read(&volumes[0]).expect("read"), payload);
-    }
-
-    // --- 事务性解压 Transactional extraction ---
-
-    #[test]
-    fn failed_extraction_leaves_no_staging_directory() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source = temp.path().join("tree");
-        write_file(&source.join("a.bin"), &pseudo_random_bytes(512 * 1024));
-        write_file(&source.join("nested/b.bin"), &pseudo_random_bytes(512 * 1024));
-
-        let archive = temp.path().join("tree.tar.zst");
-        compress_archive_sync(
-            archive_request(&source, &archive, 3, true, None, None),
-            None,
-            None,
-        )
-        .expect("compress");
-
-        // 中途截断，使 tar 解压半途失败 / Truncate mid-stream so tar extraction fails partway through.
-        let raw = fs::read(&archive).expect("read archive");
-        let broken = temp.path().join("broken.tar.zst");
-        fs::write(&broken, &raw[..raw.len() / 2]).expect("write truncated");
-
-        let output_dir = temp.path().join("dest");
-        fs::create_dir_all(&output_dir).expect("create dest");
-        let output = output_dir.join("tree_extracted");
-
-        decompress_archive_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&broken),
-                output_path: Some(path_to_string(&output)),
-                password: None,
-            },
-            None,
-            None,
-        )
-        .expect_err("truncated archive must fail");
-
-        assert!(!output.exists(), "output must not be created on failure");
-        let leftovers: Vec<_> = fs::read_dir(&output_dir)
-            .expect("read dest")
-            .filter_map(std::result::Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "staging path leaked into the output directory: {leftovers:?}"
-        );
-    }
-
-    #[test]
-    fn concurrent_extractions_do_not_share_a_staging_path() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let parent = temp.path();
-        let first = unique_temp_path(parent).expect("first");
-        let second = unique_temp_path(parent).expect("second");
-        assert_ne!(
-            first, second,
-            "two extractions in one directory must not collide"
-        );
-    }
-
-    // --- 预览 Preview ---
-
-    #[test]
-    fn preview_reports_real_size_and_rejects_wrong_password() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("blob.bin");
-        let payload = pseudo_random_bytes(700 * 1024);
-        write_file(&source_path, &payload);
-
-        let archive = temp.path().join("blob.bin.zst.enc");
-        compress_archive_sync(
-            archive_request(&source_path, &archive, 3, true, Some("pw123"), None),
-            None,
-            None,
-        )
-        .expect("compress");
-
-        let report = list_archive_content_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&archive),
-                output_path: None,
-                password: Some("pw123".to_string()),
-            },
-            None,
-            None,
-        )
-        .expect("preview");
-
-        assert_eq!(report.total_files, 1);
-        assert_eq!(report.uncompressed_size, payload.len() as u64);
-        assert_eq!(report.entries[0].path, "blob.bin");
-
-        let err = list_archive_content_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&archive),
-                output_path: None,
-                password: Some("wrong".to_string()),
-            },
-            None,
-            None,
-        )
-        .expect_err("wrong password must fail");
-        // 只显示最外层上下文；`{:#}` 遍历整条链 / `to_string()` shows only the outermost context; `{:#}` walks the chain.
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("解密失败") || chain.contains("密码"),
-            "unexpected error: {chain}"
-        );
-    }
-
-    #[test]
-    fn preview_hash_matches_full_volume_chain() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("payload.bin");
-        write_file(&source_path, &pseudo_random_bytes(3 * 1024 * 1024));
-
-        let archive = temp.path().join("payload.bin.zst");
-        compress_archive_sync(
-            archive_request(&source_path, &archive, 3, true, None, Some(1)),
-            None,
-            None,
-        )
-        .expect("compress split");
-
-        let volumes = existing_volume_paths(&archive).expect("volumes");
-        let report = list_archive_content_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&volumes[0]),
-                output_path: None,
-                password: None,
-            },
-            None,
-            None,
-        )
-        .expect("preview split");
-
-        let meta = detect_archive_meta(&volumes[0]).expect("meta");
-        assert_eq!(
-            report.hash,
-            calculate_archive_hash(&volumes[0], meta).expect("hash")
-        );
-    }
-
-    // --- 符号链接 Symlinks ---
-
-    #[cfg(unix)]
-    #[test]
-    fn directory_roundtrip_preserves_symlinks() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source = temp.path().join("tree");
-        write_file(&source.join("real.txt"), b"real content");
-        std::os::unix::fs::symlink("real.txt", source.join("link.txt")).expect("symlink");
-
-        let archive = temp.path().join("tree.tar.zst");
-        compress_archive_sync(
-            archive_request(&source, &archive, 3, false, None, None),
-            None,
-            None,
-        )
-        .expect("compress");
-
-        let output = temp.path().join("restored");
-        decompress_archive_sync(
-            DecompressRequest {
-                archive_path: path_to_string(&archive),
-                output_path: Some(path_to_string(&output)),
-                password: None,
-            },
-            None,
-            None,
-        )
-        .expect("decompress");
-
-        let restored_link = output.join("link.txt");
-        let link_meta = fs::symlink_metadata(&restored_link).expect("symlink metadata");
-        assert!(
-            link_meta.file_type().is_symlink(),
-            "symlink was dropped or materialised as a regular file"
-        );
-        assert_eq!(
-            fs::read_link(&restored_link).expect("read_link"),
-            PathBuf::from("real.txt")
-        );
-    }
-
-    // --- 基准测试 Benchmark ---
-
-    #[test]
-    fn benchmark_sample_fills_requested_size() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("blob.bin");
-        write_file(&source_path, &deterministic_bytes(9 * 1024 * 1024));
-
-        // 9 MiB 文件上设 3 MiB 上限：从头/中/尾取样，结果应接近上限而非短读的量。
-        // 3 MiB cap over a 9 MiB file: sampled from head/middle/tail, so we
-        // should get very close to the cap rather than a short read's worth.
-        let sample = load_benchmark_sample(&source_path, 3 * 1024 * 1024).expect("sample");
-        assert_eq!(sample.len(), 3 * (1024 * 1024));
-    }
-
-    #[test]
-    fn benchmark_honours_abort_between_chunks() {
-        let state = AppState::new();
-        state.request_abort();
-        let err = compress_to_count(&pseudo_random_bytes(8 * 1024 * 1024), 3, 1, Some(&state))
-            .expect_err("must abort");
-        assert!(err.to_string().contains("终止"));
-    }
-}
+mod tests;
 
 #[cfg(test)]
 mod regression_tests;

@@ -54,4 +54,5 @@ jobs:
         with:
           name: ZARC ${{ github.ref_name }}
           generate_release_notes: true
-          files: release/*
+          # defaults.working-directory 不影响 uses: 步骤，files 相对仓库根解析。
+          files: zarc-desktop/release/*
